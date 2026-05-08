@@ -722,10 +722,24 @@ body {
     <div id="confirmPanel" style="display:none">
       <div class="auth-title">Check your email</div>
       <p style="font-size:13px;color:var(--ink-3);line-height:1.6;margin-bottom:20px">
-        We sent a confirmation link to your email. Click it to activate your account,
-        then return here to sign in.
+        We sent a confirmation link to <span id="confirmEmail" style="color:var(--ink);font-weight:500"></span>.
+        Click it to activate your account — this tab will update automatically when you do.
       </p>
-      <button class="btn btn-primary btn-full" onclick="showPanel('signIn')">Back to Sign In</button>
+      <!-- Subtle waiting indicator so user knows the tab is listening -->
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:20px">
+        <div class="sync-dot syncing"></div>
+        <span style="font-family:var(--ff-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)">Waiting for confirmation…</span>
+      </div>
+      <button class="btn btn-ghost btn-full" onclick="showPanel('signIn')" style="font-size:12px">
+        Already confirmed? Sign in manually
+      </button>
+    </div>
+
+    <!-- WELCOME PANEL — shown briefly after auto-login on confirmation -->
+    <div id="welcomePanel" style="display:none;text-align:center;padding:20px 0">
+      <div style="font-size:32px;margin-bottom:16px">✓</div>
+      <div class="auth-title" style="text-align:center">You're in.</div>
+      <p style="font-size:13px;color:var(--ink-3);text-align:center">Loading your workspace…</p>
     </div>
 
   </div>
@@ -1194,7 +1208,7 @@ async function signIn() {
     // Success — store session and user, then show the app
     currentSession = data;
     currentUser    = data.user;
-    onAuthSuccess();
+    onAuthSuccess(true); // skipWelcome=true — returning user, no need for welcome moment
 
   } catch (e) {
     showAuthError(e.message);
@@ -1230,7 +1244,8 @@ async function signUp() {
       onAuthSuccess();
     } else {
       // Email confirmation required — tell user to check inbox
-      showPanel('confirm');
+      // Pass the email so we can show it on the confirm panel
+      showPanel('confirm', email);
     }
 
   } catch (e) {
@@ -1259,20 +1274,38 @@ async function signOut() {
   currentUser    = null;
   currentSession = null;
   clients        = [];
-  localStorage.removeItem('cwc-session'); // remove saved session
+  localStorage.removeItem('cwc-session');    // remove saved session
+  localStorage.removeItem('cwc-auth-event'); // remove cross-tab sync marker
 
   showAppState(false); // return to login screen
 }
 
-// Called after a successful sign in or sign up
-function onAuthSuccess() {
+// Called after a successful sign in or sign up.
+// Shows a brief welcome moment before transitioning to the app —
+// makes auto-login feel intentional rather than abrupt.
+function onAuthSuccess(skipWelcome = false) {
   // Persist session so the user stays logged in on refresh
   localStorage.setItem('cwc-session', JSON.stringify({
     session: currentSession,
     user:    currentUser,
   }));
-  showAppState(true);
-  loadClients(); // fetch their data from Supabase
+
+  // Broadcast login to any other open tabs (e.g. the original
+  // "Check your email" tab that's still open)
+  localStorage.setItem('cwc-auth-event', Date.now().toString());
+
+  if (skipWelcome) {
+    // Returning user — skip the welcome, go straight to the app
+    showAppState(true);
+    loadClients();
+  } else {
+    // New confirmation — show a brief welcome moment
+    showPanel('welcome');
+    setTimeout(() => {
+      showAppState(true);
+      loadClients();
+    }, 1400); // 1.4 seconds — long enough to read, short enough to feel snappy
+  }
 }
 
 // Show or hide the app vs the auth screen
@@ -1292,12 +1325,20 @@ function showAppState(loggedIn) {
   }
 }
 
-// Switch between sign-in, sign-up, and confirm panels
-function showPanel(panel) {
+// Switch between auth panels.
+// Panels: 'signIn' | 'signUp' | 'confirm' | 'welcome'
+// email param — when showing 'confirm', display the address we sent to
+function showPanel(panel, email) {
   document.getElementById('authError').classList.remove('show');
-  document.getElementById('signInPanel').style.display  = panel === 'signIn'  ? 'block' : 'none';
-  document.getElementById('signUpPanel').style.display  = panel === 'signUp'  ? 'block' : 'none';
-  document.getElementById('confirmPanel').style.display = panel === 'confirm' ? 'block' : 'none';
+  document.getElementById('signInPanel').style.display   = panel === 'signIn'   ? 'block' : 'none';
+  document.getElementById('signUpPanel').style.display   = panel === 'signUp'   ? 'block' : 'none';
+  document.getElementById('confirmPanel').style.display  = panel === 'confirm'  ? 'block' : 'none';
+  document.getElementById('welcomePanel').style.display  = panel === 'welcome'  ? 'block' : 'none';
+
+  // Show the email address the confirmation was sent to
+  if (panel === 'confirm' && email) {
+    document.getElementById('confirmEmail').textContent = email;
+  }
 }
 
 // Show an error message in the auth error banner
@@ -1985,17 +2026,72 @@ document.addEventListener('keydown', e => {
 /* ============================================================
    SECTION 12: INIT (APP STARTUP)
    ─────────────────────────────────────────────────────────────
-   Runs immediately when the page loads. Checks localStorage
-   for a saved session. If found, skips login and loads data.
-   If not, shows the auth screen.
+   Runs immediately when the page loads. Handles three scenarios:
+
+   A) CONFIRMATION TOKEN IN URL
+      Supabase redirects here after email confirmation with
+      tokens in the URL hash (#access_token=...&type=signup).
+      We detect this, exchange the token for a session,
+      log the user in automatically, and clean the URL.
+
+   B) SAVED SESSION IN LOCALSTORAGE
+      Returning user — skip the login screen entirely.
+
+   C) CROSS-TAB SYNC
+      If the user confirmed in a new tab, this tab (the original
+      "Check your email" screen) detects it via a localStorage
+      event and transitions to the logged-in state automatically.
+
+   D) NO SESSION
+      Show the auth screen.
 
    NOTE ON SESSION EXPIRY:
-   Supabase access tokens expire after 1 hour by default.
-   If the token has expired, the first DB call will fail with
-   an auth error. The user will need to sign in again.
-   A production app would implement token refresh here.
+   Supabase access tokens expire after 1 hour. If expired,
+   the first DB call will fail and the user must sign in again.
+   A future improvement would implement refresh token rotation.
    ============================================================ */
 (function init() {
+
+  // ── SCENARIO A: Confirmation token in URL ─────────────────
+  // After clicking the confirmation link in their email,
+  // Supabase redirects to our app with tokens in the URL hash:
+  // https://yoursite.com/crm#access_token=xxx&refresh_token=yyy&type=signup
+  const hash   = window.location.hash;
+  const params = new URLSearchParams(hash.replace('#', '?'));
+
+  const accessToken  = params.get('access_token');
+  const refreshToken = params.get('refresh_token');
+  const tokenType    = params.get('type'); // 'signup' for confirmations
+
+  if (accessToken && tokenType === 'signup') {
+    // Clean the tokens out of the URL immediately — they shouldn't
+    // sit in the address bar or browser history after use
+    history.replaceState(null, '', window.location.pathname);
+
+    // Build a minimal session object from the URL tokens
+    // We also need the user details — fetch them from Supabase
+    fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: {
+        'apikey':        SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${accessToken}`,
+      }
+    })
+    .then(r => r.json())
+    .then(user => {
+      // Set up the session with the tokens from the URL
+      currentSession = { access_token: accessToken, refresh_token: refreshToken };
+      currentUser    = user;
+      onAuthSuccess(false); // false = show welcome moment (new user)
+    })
+    .catch(() => {
+      // Token exchange failed — fall back to sign in screen
+      showAppState(false);
+    });
+
+    return; // don't fall through to other scenarios
+  }
+
+  // ── SCENARIO B: Saved session ─────────────────────────────
   const saved = localStorage.getItem('cwc-session');
   if (saved) {
     try {
@@ -2003,16 +2099,49 @@ document.addEventListener('keydown', e => {
       if (session && user) {
         currentSession = session;
         currentUser    = user;
-        showAppState(true);  // show the app immediately (skip auth screen)
-        loadClients();       // then fetch fresh data in the background
+        showAppState(true);   // show app immediately
+        loadClients();        // fetch data in background
         return;
       }
     } catch (e) {
       // Corrupted session data — fall through to auth screen
     }
   }
-  showAppState(false); // no valid session — show login
+
+  // ── SCENARIO D: No session — show auth screen ─────────────
+  showAppState(false);
+
 })();
+
+// ── SCENARIO C: Cross-tab sync ───────────────────────────────
+// Listen for localStorage changes from other tabs.
+// When a confirmation happens in a new tab, onAuthSuccess()
+// writes a 'cwc-auth-event' key. This tab detects it and
+// transitions from "Check your email" to logged-in state.
+window.addEventListener('storage', (e) => {
+  if (e.key !== 'cwc-auth-event') return;
+  if (currentUser) return; // already logged in, nothing to do
+
+  // Another tab just logged in — read their session and use it
+  const saved = localStorage.getItem('cwc-session');
+  if (!saved) return;
+
+  try {
+    const { session, user } = JSON.parse(saved);
+    if (session && user) {
+      currentSession = session;
+      currentUser    = user;
+      // Show welcome briefly — this tab was on the confirm screen
+      showPanel('welcome');
+      setTimeout(() => {
+        showAppState(true);
+        loadClients();
+      }, 1400);
+    }
+  } catch (e) {
+    // Ignore — session was malformed
+  }
+});
 
 /*
   ============================================================
