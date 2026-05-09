@@ -736,10 +736,19 @@ body {
     </div>
 
     <!-- WELCOME PANEL — shown briefly after auto-login on confirmation -->
-    <div id="welcomePanel" style="display:none;text-align:center;padding:20px 0">
-      <div style="font-size:32px;margin-bottom:16px">✓</div>
-      <div class="auth-title" style="text-align:center">You're in.</div>
-      <p style="font-size:13px;color:var(--ink-3);text-align:center">Loading your workspace…</p>
+    <div id="welcomePanel" style="display:none">
+      <div id="welcomeAnimation" style="position:relative;height:120px;margin:-40px -40px 24px;overflow:hidden;border-radius:14px 14px 0 0;background:var(--teal)">
+        <canvas id="inkCanvas" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
+        <!-- Ink drop rings rendered on canvas below -->
+      </div>
+      <div style="text-align:center;padding:0 20px 8px">
+        <div style="font-family:var(--ff-display);font-size:32px;font-weight:300;color:var(--ink);margin-bottom:8px;opacity:0;transform:translateY(8px);transition:all .6s ease .4s" id="welcomeHeading">
+          You're in.
+        </div>
+        <p style="font-size:13px;color:var(--ink-3);opacity:0;transition:opacity .6s ease .8s" id="welcomeSub">
+          Loading your workspace…
+        </p>
+      </div>
     </div>
 
   </div>
@@ -1304,7 +1313,7 @@ function onAuthSuccess(skipWelcome = false) {
     setTimeout(() => {
       showAppState(true);
       loadClients();
-    }, 1400); // 1.4 seconds — long enough to read, short enough to feel snappy
+    }, 3000); // 3 seconds — enough to read and feel the positive affirmation
   }
 }
 
@@ -1325,21 +1334,8 @@ function showAppState(loggedIn) {
   }
 }
 
-// Switch between auth panels.
-// Panels: 'signIn' | 'signUp' | 'confirm' | 'welcome'
-// email param — when showing 'confirm', display the address we sent to
-function showPanel(panel, email) {
-  document.getElementById('authError').classList.remove('show');
-  document.getElementById('signInPanel').style.display   = panel === 'signIn'   ? 'block' : 'none';
-  document.getElementById('signUpPanel').style.display   = panel === 'signUp'   ? 'block' : 'none';
-  document.getElementById('confirmPanel').style.display  = panel === 'confirm'  ? 'block' : 'none';
-  document.getElementById('welcomePanel').style.display  = panel === 'welcome'  ? 'block' : 'none';
-
-  // Show the email address the confirmation was sent to
-  if (panel === 'confirm' && email) {
-    document.getElementById('confirmEmail').textContent = email;
-  }
-}
+// showPanel is defined below in the animation section, alongside startInkAnimation,
+// so it can wrap the animation trigger cleanly.
 
 // Show an error message in the auth error banner
 function showAuthError(msg) {
@@ -1347,6 +1343,26 @@ function showAuthError(msg) {
   el.textContent = msg;
   el.classList.add('show');
 }
+
+// ── ENTER KEY SUBMISSION ON AUTH FORMS ───────────────────────
+// Pressing Enter in any auth form field triggers the relevant
+// action — same as clicking the button. The button stays visible
+// so mouse users aren't confused, but keyboard users don't need it.
+document.addEventListener('DOMContentLoaded', () => {
+  // Sign in fields — both trigger signIn()
+  ['si-email', 'si-password'].forEach(id => {
+    document.getElementById(id)?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); signIn(); }
+    });
+  });
+
+  // Sign up fields — both trigger signUp()
+  ['su-email', 'su-password'].forEach(id => {
+    document.getElementById(id)?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); signUp(); }
+    });
+  });
+});
 
 // Disable button and show loading text while request is in flight
 function setAuthLoading(btnId, loading) {
@@ -2024,6 +2040,153 @@ document.addEventListener('keydown', e => {
 
 
 /* ============================================================
+   WELCOME ANIMATION — Ink Drop
+   ─────────────────────────────────────────────────────────────
+   A canvas-based ink bloom effect that plays when the user
+   first confirms their account. Organic expanding rings in the
+   brand teal palette — editorial, warm, considered.
+
+   HOW IT WORKS:
+   Multiple "drops" spawn at random positions. Each drop expands
+   as a circle, fading from a lighter teal to transparent as it
+   grows. Drops are staggered in time so they feel organic rather
+   than simultaneous. The canvas is cleared and redrawn every
+   frame via requestAnimationFrame.
+   ============================================================ */
+function startInkAnimation() {
+  const canvas = document.getElementById('inkCanvas');
+  if (!canvas) return;
+
+  const ctx    = canvas.getContext('2d');
+  const W      = canvas.offsetWidth;
+  const H      = canvas.offsetHeight;
+
+  // Set actual pixel dimensions (important for sharp rendering)
+  canvas.width  = W * window.devicePixelRatio;
+  canvas.height = H * window.devicePixelRatio;
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+  // Ink drop definition — each has position, size, speed, opacity, color
+  const drops = [];
+
+  // Spawn drops at staggered intervals for organic feel
+  const colors = [
+    'rgba(61, 100, 100,',   // teal-2 variant
+    'rgba(74, 124, 89,',    // green tint
+    'rgba(47, 79, 79,',     // deep teal
+    'rgba(100, 140, 130,',  // lighter teal
+    'rgba(198, 138, 46,',   // amber accent — warm surprise
+  ];
+
+  function spawnDrop(delay) {
+    setTimeout(() => {
+      drops.push({
+        x:       Math.random() * W,
+        y:       Math.random() * H,
+        r:       0,                          // current radius
+        maxR:    60 + Math.random() * 80,    // how large it grows
+        speed:   0.6 + Math.random() * 0.8, // expansion speed
+        opacity: 0.35 + Math.random() * 0.3,// starting opacity
+        color:   colors[Math.floor(Math.random() * colors.length)],
+      });
+    }, delay);
+  }
+
+  // Spawn 8 drops over the first 2 seconds
+  [0, 180, 380, 550, 750, 950, 1200, 1550].forEach(spawnDrop);
+
+  let frame;
+  let startTime = null;
+
+  function draw(timestamp) {
+    if (!startTime) startTime = timestamp;
+    const elapsed = timestamp - startTime;
+
+    // Clear with a semi-transparent teal base each frame
+    // This creates a subtle trail effect as old positions fade
+    ctx.fillStyle = 'rgba(47, 79, 79, 0.15)';
+    ctx.fillRect(0, 0, W, H);
+
+    drops.forEach(drop => {
+      // Expand the radius
+      drop.r += drop.speed;
+
+      // Fade opacity as the drop reaches its max size
+      const progress = drop.r / drop.maxR;
+      const alpha    = drop.opacity * (1 - progress);
+
+      if (alpha <= 0) return; // fully faded — skip
+
+      // Draw the expanding ring
+      // Outer glow
+      const gradient = ctx.createRadialGradient(
+        drop.x, drop.y, drop.r * 0.4,
+        drop.x, drop.y, drop.r
+      );
+      gradient.addColorStop(0, `${drop.color} ${alpha * 0.3})`);
+      gradient.addColorStop(0.6, `${drop.color} ${alpha})`);
+      gradient.addColorStop(1, `${drop.color} 0)`);
+
+      ctx.beginPath();
+      ctx.arc(drop.x, drop.y, drop.r, 0, Math.PI * 2);
+      ctx.fillStyle = gradient;
+      ctx.fill();
+    });
+
+    // Remove fully expanded drops
+    for (let i = drops.length - 1; i >= 0; i--) {
+      if (drops[i].r >= drops[i].maxR) drops.splice(i, 1);
+    }
+
+    // Stop animating after 3 seconds (matches the welcome panel duration)
+    if (elapsed < 3000) {
+      frame = requestAnimationFrame(draw);
+    }
+  }
+
+  frame = requestAnimationFrame(draw);
+
+  // Fade in the text elements via their CSS transitions
+  // (opacity:0 → opacity:1 driven by adding the class after a tick)
+  requestAnimationFrame(() => {
+    const heading = document.getElementById('welcomeHeading');
+    const sub     = document.getElementById('welcomeSub');
+    if (heading) { heading.style.opacity = '1'; heading.style.transform = 'translateY(0)'; }
+    if (sub)     { sub.style.opacity = '1'; }
+  });
+
+  // Return cleanup function so we can cancel the animation if needed
+  return () => cancelAnimationFrame(frame);
+}
+
+// Patch showPanel to trigger the animation when welcome panel appears
+const _originalShowPanel = showPanel;
+// Override defined after showPanel declaration — wraps it cleanly
+function showPanel(panel, email) {
+  // Reset welcome text opacity before showing (in case of re-trigger)
+  const heading = document.getElementById('welcomeHeading');
+  const sub     = document.getElementById('welcomeSub');
+  if (heading) { heading.style.opacity = '0'; heading.style.transform = 'translateY(8px)'; }
+  if (sub)     { sub.style.opacity = '0'; }
+
+  document.getElementById('authError').classList.remove('show');
+  document.getElementById('signInPanel').style.display   = panel === 'signIn'   ? 'block' : 'none';
+  document.getElementById('signUpPanel').style.display   = panel === 'signUp'   ? 'block' : 'none';
+  document.getElementById('confirmPanel').style.display  = panel === 'confirm'  ? 'block' : 'none';
+  document.getElementById('welcomePanel').style.display  = panel === 'welcome'  ? 'block' : 'none';
+
+  if (panel === 'confirm' && email) {
+    document.getElementById('confirmEmail').textContent = email;
+  }
+
+  // Start ink animation when welcome panel appears
+  if (panel === 'welcome') {
+    // Small delay so the panel is visible before canvas sizes itself
+    setTimeout(startInkAnimation, 30);
+  }
+}
+
+/* ============================================================
    SECTION 12: INIT (APP STARTUP)
    ─────────────────────────────────────────────────────────────
    Runs immediately when the page loads. Handles three scenarios:
@@ -2136,7 +2299,7 @@ window.addEventListener('storage', (e) => {
       setTimeout(() => {
         showAppState(true);
         loadClients();
-      }, 1400);
+      }, 3000);
     }
   } catch (e) {
     // Ignore — session was malformed
