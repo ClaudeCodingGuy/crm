@@ -1245,15 +1245,56 @@ async function signUp() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error_description || data.msg || 'Sign up failed');
 
-    // If email confirmation is required, show the "check your email" panel
     if (data.session) {
-      // Email confirmation disabled — logged in immediately
+      // Clean path — confirmation off, Supabase returned a session immediately
       currentSession = data.session;
       currentUser    = data.user;
-      onAuthSuccess();
+      onAuthSuccess(false); // false = show welcome animation
+
+    } else if (data.user && data.user.identities && data.user.identities.length === 0) {
+      // User already exists in Supabase — identities array is empty when duplicate
+      showAuthError('An account with this email already exists. Try signing in instead.');
+
+    } else if (data.user) {
+      // Supabase returned a user but no session. This happens when SMTP is
+      // configured but confirmation is toggled off — Supabase behaviour is
+      // inconsistent in this state. We attempt an immediate sign-in with the
+      // same credentials the user just provided to get a session directly.
+      // Show a brief loading state rather than the confirm screen while we try.
+      document.getElementById('authError').classList.remove('show');
+      document.getElementById('signUpPanel').style.display  = 'none';
+      document.getElementById('signInPanel').style.display  = 'none';
+      document.getElementById('confirmPanel').style.display = 'none';
+      document.getElementById('welcomePanel').style.display = 'none';
+      // Show a simple loading message while we attempt auto sign-in
+      const loadingDiv = document.createElement('div');
+      loadingDiv.id = 'autoSigninLoader';
+      loadingDiv.style.cssText = 'text-align:center;padding:20px 0';
+      loadingDiv.innerHTML = '<div class="spinner" style="margin:0 auto 12px"></div><p style="font-family:var(--ff-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)">Setting up your account…</p>';
+      document.querySelector('.auth-box').appendChild(loadingDiv);
+
+      const signinRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+        body: JSON.stringify({ email, password }),
+      });
+      const signinData = await signinRes.json();
+
+      // Remove the loading div
+      document.getElementById('autoSigninLoader')?.remove();
+
+      if (signinRes.ok && signinData.access_token) {
+        // Sign-in succeeded — show welcome animation
+        currentSession = signinData;
+        currentUser    = signinData.user;
+        onAuthSuccess(false);
+      } else {
+        // Auto sign-in failed — fall back to confirm screen
+        showPanel('confirm', email);
+      }
+
     } else {
-      // Email confirmation required — tell user to check inbox
-      // Pass the email so we can show it on the confirm panel
+      // No user, no session — show confirm screen as fallback
       showPanel('confirm', email);
     }
 
