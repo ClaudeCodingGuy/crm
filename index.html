@@ -128,6 +128,7 @@ body {
   border-radius: var(--r-xl);
   padding: 40px; width: 100%; max-width: 400px;
   box-shadow: var(--shadow-lg);
+  position: relative; /* needed so welcome panel covers the box exactly */
 }
 .auth-logo {
   font-family: var(--ff-display);
@@ -736,16 +737,15 @@ body {
     </div>
 
     <!-- WELCOME PANEL — shown briefly after auto-login on confirmation -->
-    <div id="welcomePanel" style="display:none">
-      <div id="welcomeAnimation" style="position:relative;height:120px;margin:-40px -40px 24px;overflow:hidden;border-radius:14px 14px 0 0;background:var(--teal)">
-        <canvas id="inkCanvas" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
-        <!-- Ink drop rings rendered on canvas below -->
-      </div>
-      <div style="text-align:center;padding:0 20px 8px">
-        <div style="font-family:var(--ff-display);font-size:32px;font-weight:300;color:var(--ink);margin-bottom:8px;opacity:0;transform:translateY(8px);transition:all .6s ease .4s" id="welcomeHeading">
+    <!-- Positioned absolutely to cover the entire auth-box, including the sign-up form beneath -->
+    <div id="welcomePanel" style="display:none;position:absolute;inset:0;background:var(--paper);border-radius:var(--r-xl);overflow:hidden;z-index:10">
+      <canvas id="inkCanvas" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
+      <!-- Text floats above the canvas animation -->
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;text-align:center">
+        <div style="font-family:var(--ff-display);font-size:36px;font-weight:300;color:#F5F1EA;margin-bottom:10px;opacity:0;transform:translateY(10px);transition:all .7s ease .5s" id="welcomeHeading">
           You're in.
         </div>
-        <p style="font-size:13px;color:var(--ink-3);opacity:0;transition:opacity .6s ease .8s" id="welcomeSub">
+        <p style="font-family:var(--ff-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:rgba(245,241,234,.6);opacity:0;transition:opacity .7s ease 1s" id="welcomeSub">
           Loading your workspace…
         </p>
       </div>
@@ -1001,7 +1001,7 @@ const BACKEND = 'supabase'; // ← change this to switch backends
 // TO REVERT: set back to false, re-enable confirmation + SMTP
 //
 // ⚠️  NEVER deploy to production with TEST_MODE = false
-const TEST_MODE = true; // ← set to false for production
+const TEST_MODE = false; // ← set to true only for testing (see comments above)
 
 // Your Supabase project credentials.
 // The ANON KEY is safe to include here — it's a public key
@@ -1368,7 +1368,7 @@ function onAuthSuccess(skipWelcome = false) {
     setTimeout(() => {
       showAppState(true);
       loadClients();
-    }, 3000); // 3 seconds — enough to read and feel the positive affirmation
+    }, 4000); // 4 seconds — enough to read and feel the positive affirmation
   }
 }
 
@@ -2112,25 +2112,28 @@ function startInkAnimation() {
   const canvas = document.getElementById('inkCanvas');
   if (!canvas) return;
 
-  const ctx    = canvas.getContext('2d');
-  const W      = canvas.offsetWidth;
-  const H      = canvas.offsetHeight;
+  const ctx = canvas.getContext('2d');
+  const W   = canvas.offsetWidth;
+  const H   = canvas.offsetHeight;
 
-  // Set actual pixel dimensions (important for sharp rendering)
+  // Set actual pixel dimensions for sharp rendering on retina screens
   canvas.width  = W * window.devicePixelRatio;
   canvas.height = H * window.devicePixelRatio;
   ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
 
-  // Ink drop definition — each has position, size, speed, opacity, color
+  // Fill background immediately so white auth-box doesn't flash through
+  ctx.fillStyle = '#2F4F4F';
+  ctx.fillRect(0, 0, W, H);
+
   const drops = [];
 
-  // Spawn drops at staggered intervals for organic feel
+  // Colors that read beautifully against the deep teal background
   const colors = [
-    'rgba(61, 100, 100,',   // teal-2 variant
-    'rgba(74, 124, 89,',    // green tint
-    'rgba(47, 79, 79,',     // deep teal
-    'rgba(100, 140, 130,',  // lighter teal
-    'rgba(198, 138, 46,',   // amber accent — warm surprise
+    'rgba(74, 124, 89,',    // green — warmth
+    'rgba(100, 160, 140,',  // light teal — luminous
+    'rgba(198, 138, 46,',   // amber — warm surprise accent
+    'rgba(245, 241, 234,',  // paper white — soft glow
+    'rgba(61, 110, 110,',   // mid teal — depth
   ];
 
   function spawnDrop(delay) {
@@ -2138,17 +2141,17 @@ function startInkAnimation() {
       drops.push({
         x:       Math.random() * W,
         y:       Math.random() * H,
-        r:       0,                          // current radius
-        maxR:    60 + Math.random() * 80,    // how large it grows
-        speed:   0.6 + Math.random() * 0.8, // expansion speed
-        opacity: 0.35 + Math.random() * 0.3,// starting opacity
+        r:       0,
+        maxR:    Math.min(W, H) * (0.3 + Math.random() * 0.5), // scale to panel size
+        speed:   0.8 + Math.random() * 1.2,
+        opacity: 0.2 + Math.random() * 0.35,
         color:   colors[Math.floor(Math.random() * colors.length)],
       });
     }, delay);
   }
 
-  // Spawn 8 drops over the first 2 seconds
-  [0, 180, 380, 550, 750, 950, 1200, 1550].forEach(spawnDrop);
+  // 10 drops spread across 4 seconds for a rich layered bloom
+  [0, 150, 320, 500, 720, 950, 1200, 1600, 2100, 2700].forEach(spawnDrop);
 
   let frame;
   let startTime = null;
@@ -2157,30 +2160,23 @@ function startInkAnimation() {
     if (!startTime) startTime = timestamp;
     const elapsed = timestamp - startTime;
 
-    // Clear with a semi-transparent teal base each frame
-    // This creates a subtle trail effect as old positions fade
-    ctx.fillStyle = 'rgba(47, 79, 79, 0.15)';
+    // Semi-transparent fill each frame creates organic trailing fade
+    ctx.fillStyle = 'rgba(47, 79, 79, 0.12)';
     ctx.fillRect(0, 0, W, H);
 
     drops.forEach(drop => {
-      // Expand the radius
       drop.r += drop.speed;
-
-      // Fade opacity as the drop reaches its max size
       const progress = drop.r / drop.maxR;
-      const alpha    = drop.opacity * (1 - progress);
+      const alpha    = drop.opacity * (1 - Math.pow(progress, 1.5));
+      if (alpha <= 0.01) return;
 
-      if (alpha <= 0) return; // fully faded — skip
-
-      // Draw the expanding ring
-      // Outer glow
       const gradient = ctx.createRadialGradient(
-        drop.x, drop.y, drop.r * 0.4,
+        drop.x, drop.y, drop.r * 0.2,
         drop.x, drop.y, drop.r
       );
-      gradient.addColorStop(0, `${drop.color} ${alpha * 0.3})`);
-      gradient.addColorStop(0.6, `${drop.color} ${alpha})`);
-      gradient.addColorStop(1, `${drop.color} 0)`);
+      gradient.addColorStop(0,   `${drop.color} ${alpha * 0.4})`);
+      gradient.addColorStop(0.5, `${drop.color} ${alpha})`);
+      gradient.addColorStop(1,   `${drop.color} 0)`);
 
       ctx.beginPath();
       ctx.arc(drop.x, drop.y, drop.r, 0, Math.PI * 2);
@@ -2193,16 +2189,14 @@ function startInkAnimation() {
       if (drops[i].r >= drops[i].maxR) drops.splice(i, 1);
     }
 
-    // Stop animating after 3 seconds (matches the welcome panel duration)
-    if (elapsed < 3000) {
+    if (elapsed < 4000) {
       frame = requestAnimationFrame(draw);
     }
   }
 
   frame = requestAnimationFrame(draw);
 
-  // Fade in the text elements via their CSS transitions
-  // (opacity:0 → opacity:1 driven by adding the class after a tick)
+  // Fade in text via CSS transitions defined on the elements
   requestAnimationFrame(() => {
     const heading = document.getElementById('welcomeHeading');
     const sub     = document.getElementById('welcomeSub');
@@ -2210,12 +2204,9 @@ function startInkAnimation() {
     if (sub)     { sub.style.opacity = '1'; }
   });
 
-  // Return cleanup function so we can cancel the animation if needed
   return () => cancelAnimationFrame(frame);
 }
 
-// Patch showPanel to trigger the animation when welcome panel appears
-const _originalShowPanel = showPanel;
 // Override defined after showPanel declaration — wraps it cleanly
 function showPanel(panel, email) {
   // Reset welcome text opacity before showing (in case of re-trigger)
@@ -2354,7 +2345,7 @@ window.addEventListener('storage', (e) => {
       setTimeout(() => {
         showAppState(true);
         loadClients();
-      }, 3000);
+      }, 4000);
     }
   } catch (e) {
     // Ignore — session was malformed
