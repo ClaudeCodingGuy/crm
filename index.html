@@ -1000,7 +1000,7 @@ const BACKEND = 'supabase'; // ← change this to switch backends
 // TO USE: set to true, disable confirmation in Supabase dashboard
 // TO REVERT: set back to false, re-enable confirmation + SMTP
 //
-// ⚠️  NEVER deploy to production with TEST_MODE = false
+// ⚠️  NEVER deploy to production with TEST_MODE = true
 const TEST_MODE = false; // ← set to true only for testing (see comments above)
 
 // Your Supabase project credentials.
@@ -1110,6 +1110,108 @@ const DB = {
 
 // Convert app client object → database row format
 // Add new fields here when you add columns to the SQL table
+/* ============================================================
+   SECTION 5A: ANALYTICS TRACKING
+   ─────────────────────────────────────────────────────────────
+   A single track() function is the only way the app writes
+   to the events and client_stage_history tables. All other
+   code calls this function — nothing writes directly.
+
+   DESIGN DECISIONS:
+   - Fire-and-forget: tracking never blocks the UI or throws
+     visible errors. A failed track call is logged to console
+     only. The user experience is never interrupted.
+   - Append-only: events are never updated or deleted. They
+     are immutable facts about what happened.
+   - Opt-out ready: if BACKEND !== 'supabase', tracking is
+     skipped entirely (no localStorage tracking needed).
+   - stage_changed events also update client_stage_history:
+     closes the previous open row, opens a new one.
+
+   TO ADD A NEW EVENT:
+   1. Call track('your_event_name', clientId, { ...properties })
+      anywhere in the app
+   2. No schema changes needed — properties is flexible jsonb
+   3. Document the new event in migration-v2-events.sql comments
+   ============================================================ */
+
+// Track a user action — fire and forget, never interrupts UI
+// event     — snake_case string e.g. 'stage_changed'
+// clientId  — uuid of related client, or null for session events
+// properties — plain object with event-specific data
+async function track(event, clientId = null, properties = {}) {
+  // Only track when using Supabase and user is authenticated
+  if (BACKEND !== 'supabase' || !currentUser) return;
+
+  try {
+    await sbFetch('POST', '/rest/v1/events', {
+      user_id:   currentUser.id,
+      client_id: clientId || null,
+      event,
+      properties,
+    });
+  } catch (e) {
+    // Tracking failures are always silent — never surface to user
+    console.warn('[track] Failed to record event:', event, e.message);
+  }
+}
+
+// Record a stage change — updates both the events log and the
+// client_stage_history table (closes old row, opens new one).
+// Called from the drag-and-drop handler.
+async function trackStageChange(client, fromStage, toStage, daysInPreviousStage) {
+  if (BACKEND !== 'supabase' || !currentUser) return;
+
+  try {
+    // 1. Log the stage_changed event
+    await track('stage_changed', client.id, {
+      from:                 fromStage,
+      to:                   toStage,
+      days_in_previous_stage: daysInPreviousStage,
+    });
+
+    // 2. Close the previous open stage history row
+    //    Find the row where this client's exited_at is NULL (current stage)
+    //    and set exited_at + duration_seconds
+    const now = new Date().toISOString();
+    await sbFetch('PATCH',
+      `/rest/v1/client_stage_history?client_id=eq.${client.id}&exited_at=is.null`,
+      {
+        exited_at:        now,
+        // duration_seconds will be recalculated server-side ideally,
+        // but we approximate here from the days count
+        duration_seconds: daysInPreviousStage * 86400,
+      }
+    );
+
+    // 3. Open a new stage history row for the new stage
+    await sbFetch('POST', '/rest/v1/client_stage_history', {
+      user_id:   currentUser.id,
+      client_id: client.id,
+      stage:     toStage,
+      entered_at: now,
+    });
+
+  } catch (e) {
+    console.warn('[trackStageChange] Failed:', e.message);
+  }
+}
+
+// Create the initial stage history row when a client is first created
+async function trackClientCreated(client) {
+  if (BACKEND !== 'supabase' || !currentUser) return;
+  try {
+    await sbFetch('POST', '/rest/v1/client_stage_history', {
+      user_id:   currentUser.id,
+      client_id: client.id,
+      stage:     client.stage,
+      entered_at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.warn('[trackClientCreated] Failed:', e.message);
+  }
+}
+
 function toSupabase(c, userId) {
   return {
     id:       c.id,
@@ -1362,6 +1464,8 @@ function onAuthSuccess(skipWelcome = false) {
     // Returning user — skip the welcome, go straight to the app
     showAppState(true);
     loadClients();
+    // Track session start after clients load (client_count added in loadClients)
+    track('session_started', null, { returning: true });
   } else {
     // New confirmation — show a brief welcome moment
     showPanel('welcome');
@@ -1608,6 +1712,7 @@ function setView(v) {
   currentView = v;
   document.getElementById('btn-board').classList.toggle('active', v === 'board');
   document.getElementById('btn-table').classList.toggle('active', v === 'table');
+  track('view_changed', null, { view: v });
   render();
 }
 
@@ -1615,6 +1720,7 @@ function setView(v) {
 function toggleFilter(f) {
   activeFilters[f] = !activeFilters[f];
   document.getElementById('chip-' + f).classList.toggle('active', activeFilters[f]);
+  track('filter_applied', null, { filter: f, active: activeFilters[f] });
   render();
 }
 
@@ -1889,6 +1995,14 @@ async function saveClient() {
     render();
     showToast(data._isNew ? 'Client added' : 'Client updated');
 
+    // Track the action — fire and forget after UI is updated
+    if (data._isNew) {
+      track('client_created', saved.id, { stage: saved.stage, health: saved.health, value: saved.value });
+      trackClientCreated(saved); // also open the first stage history row
+    } else {
+      track('client_updated', saved.id, { stage: saved.stage, health: saved.health, value: saved.value });
+    }
+
   } catch (e) {
     setSyncing('error');
     showToast('Error saving: ' + e.message);
@@ -1917,6 +2031,7 @@ async function deleteClient() {
     await DB.deleteClient(id);
     setSyncing('synced');
     showToast('Client deleted', true); // true = show undo button
+    track('client_deleted', id, { name: deletedClient.client.name, stage: deletedClient.client.stage });
   } catch (e) {
     // Rollback — put the client back if the delete failed
     clients.splice(deletedClient.idx, 0, deletedClient.client);
@@ -1940,6 +2055,7 @@ async function undoDelete() {
     render();
     setSyncing('synced');
     showToast('Client restored');
+    track('client_restored', saved.id, { stage: saved.stage });
   } catch (e) {
     setSyncing('error');
     showToast('Error restoring: ' + e.message);
@@ -1967,6 +2083,7 @@ async function loadDemo() {
     setSyncing('synced');
     render();
     showToast('Demo data loaded');
+    track('demo_loaded', null, { client_count: clients.length });
   } catch (e) {
     setSyncing('error');
     showToast('Error loading demo: ' + e.message);
@@ -2047,6 +2164,10 @@ async function drop(e, colBody) {
 
   const oldStage = client.stage;
 
+  // Calculate days spent in previous stage before resetting
+  const started    = client.started ? new Date(client.started) : new Date();
+  const daysInPrev = Math.round((new Date() - started) / (1000 * 60 * 60 * 24));
+
   // Update health automatically when moving between stages
   if (newStage === 'risk' || newStage === 'churned') client.health = 'red';
   if (newStage === 'active' && client.health === 'red') client.health = 'amber';
@@ -2061,6 +2182,8 @@ async function drop(e, colBody) {
     await DB.saveClient(client);
     setSyncing('synced');
     showToast(`Moved to ${STAGES.find(s => s.key === newStage)?.label}`);
+    // Track stage change — includes time spent in previous stage
+    trackStageChange(client, oldStage, newStage, daysInPrev);
   } catch (err) {
     // Rollback on failure
     client.stage = oldStage;
