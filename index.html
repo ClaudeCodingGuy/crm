@@ -990,6 +990,19 @@ body {
 
 const BACKEND = 'supabase'; // ← change this to switch backends
 
+// ── TEST MODE ─────────────────────────────────────────────────
+// When true, bypasses the email confirmation flow entirely and
+// attempts an immediate sign-in after signup. Useful when:
+//   • Supabase email confirmation is toggled OFF in the dashboard
+//   • Custom SMTP is disabled or not yet configured
+//   • You're testing the signup/welcome animation flow locally
+//
+// TO USE: set to true, disable confirmation in Supabase dashboard
+// TO REVERT: set back to false, re-enable confirmation + SMTP
+//
+// ⚠️  NEVER deploy to production with TEST_MODE = true
+const TEST_MODE = true; // ← set to false for production
+
 // Your Supabase project credentials.
 // The ANON KEY is safe to include here — it's a public key
 // protected by Row Level Security (RLS) in the database.
@@ -1255,12 +1268,10 @@ async function signUp() {
       // User already exists in Supabase — identities array is empty when duplicate
       showAuthError('An account with this email already exists. Try signing in instead.');
 
-    } else if (data.user) {
-      // Supabase returned a user but no session. This happens when SMTP is
-      // configured but confirmation is toggled off — Supabase behaviour is
-      // inconsistent in this state. We attempt an immediate sign-in with the
-      // same credentials the user just provided to get a session directly.
-      // Show a brief loading state rather than the confirm screen while we try.
+    } else if (data.user && TEST_MODE) {
+      // TEST MODE: Supabase returned a user but no session.
+      // Attempt immediate sign-in with the same credentials.
+      // This path is only active when TEST_MODE = true.
       document.getElementById('authError').classList.remove('show');
       document.getElementById('signUpPanel').style.display  = 'none';
       document.getElementById('signInPanel').style.display  = 'none';
@@ -1294,7 +1305,10 @@ async function signUp() {
       }
 
     } else {
-      // No user, no session — show confirm screen as fallback
+      // PRODUCTION PATH: no session returned — email confirmation required.
+      // Show the "Check your email" screen and wait for the user to confirm.
+      // This is the correct production flow when TEST_MODE = false,
+      // confirmation is enabled, and SMTP is properly configured.
       showPanel('confirm', email);
     }
 
