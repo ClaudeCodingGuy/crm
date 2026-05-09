@@ -1956,6 +1956,12 @@ async function saveClient() {
     return;
   }
 
+  // Snapshot the existing client values BEFORE any changes are made.
+  // Used below to build a precise diff for the client_updated event.
+  // Fields we care about tracking changes on — all the meaningful ones.
+  const TRACKED_FIELDS = ['name','contact','owner','stage','health','value','started','payment','renews','tags','action','notes'];
+  const oldClient = editingId ? clients.find(c => c.id === editingId) : null;
+
   // Parse tags from comma-separated string → array
   const tags = document.getElementById('f-tags').value
     .split(',').map(t => t.trim()).filter(Boolean);
@@ -1997,10 +2003,43 @@ async function saveClient() {
 
     // Track the action — fire and forget after UI is updated
     if (data._isNew) {
-      track('client_created', saved.id, { stage: saved.stage, health: saved.health, value: saved.value });
-      trackClientCreated(saved); // also open the first stage history row
+      track('client_created', saved.id, {
+        stage:  saved.stage,
+        health: saved.health,
+        value:  saved.value,
+      });
+      trackClientCreated(saved); // open the first stage history row
     } else {
-      track('client_updated', saved.id, { stage: saved.stage, health: saved.health, value: saved.value });
+      // Build a precise diff — only record fields that actually changed.
+      // Comparing old snapshot (captured before modal was opened) against
+      // the newly saved values. Tags are arrays so we compare as strings.
+      const changed = [];
+      const oldVals = {};
+      const newVals = {};
+
+      TRACKED_FIELDS.forEach(field => {
+        const oldVal = field === 'tags'
+          ? (oldClient?.[field] || []).join(',')
+          : String(oldClient?.[field] || '');
+        const newVal = field === 'tags'
+          ? (saved[field] || []).join(',')
+          : String(saved[field] || '');
+
+        if (oldVal !== newVal) {
+          changed.push(field);
+          oldVals[field] = oldClient?.[field];
+          newVals[field] = saved[field];
+        }
+      });
+
+      // Only fire the event if something actually changed
+      if (changed.length > 0) {
+        track('client_updated', saved.id, {
+          changed, // array of field names that changed e.g. ['health', 'value']
+          old: oldVals, // previous values keyed by field name
+          new: newVals, // new values keyed by field name
+        });
+      }
     }
 
   } catch (e) {
