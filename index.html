@@ -2016,17 +2016,24 @@ async function saveClient() {
     notes:   document.getElementById('f-notes').value.trim(),
   };
 
+  // Capture the ID before closing the modal — closeModal() sets editingId = null
+  // so we must save it now or the local array update below will fail to find the row.
+  const savedId = editingId;
+
   closeModal();
   setSyncing('syncing');
 
   try {
     const saved = await DB.saveClient(data); // returns record with final id from DB
 
-    // Update local clients array
+    // Update local clients array with the data returned from Supabase.
+    // Using savedId (not editingId which is now null after closeModal).
+    // This ensures the card and form both reflect the saved values immediately
+    // without requiring a page refresh or re-login.
     if (data._isNew) {
       clients.unshift(saved); // add to top
     } else {
-      const idx = clients.findIndex(c => c.id === editingId);
+      const idx = clients.findIndex(c => c.id === savedId);
       if (idx !== -1) clients[idx] = saved;
     }
 
