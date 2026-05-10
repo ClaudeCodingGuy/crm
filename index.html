@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <!--
   ============================================================
@@ -1328,9 +1329,15 @@ async function signIn() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error_description || data.msg || 'Sign in failed');
 
-    // Success — store session and user, then show the app
-    currentSession = data;
-    currentUser    = data.user;
+    // Supabase password login returns the session and user at the top level.
+    // We store them explicitly to ensure access_token is always accessible
+    // via currentSession.access_token regardless of response structure.
+    currentSession = {
+      access_token:  data.access_token,
+      refresh_token: data.refresh_token,
+      token_type:    data.token_type || 'bearer',
+    };
+    currentUser = data.user;
     onAuthSuccess(true); // skipWelcome=true — returning user, no need for welcome moment
 
   } catch (e) {
@@ -1397,8 +1404,12 @@ async function signUp() {
 
       if (signinRes.ok && signinData.access_token) {
         // Sign-in succeeded — show welcome animation
-        currentSession = signinData;
-        currentUser    = signinData.user;
+        currentSession = {
+          access_token:  signinData.access_token,
+          refresh_token: signinData.refresh_token,
+          token_type:    signinData.token_type || 'bearer',
+        };
+        currentUser = signinData.user;
         onAuthSuccess(false);
       } else {
         // Auto sign-in failed — fall back to confirm screen
