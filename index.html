@@ -1063,15 +1063,22 @@ const DB = {
         // Return the created record (with Supabase-generated id)
         return fromSupabase(Array.isArray(result) ? result[0] : result);
       } else {
-        // UPDATE — fetch back the updated record so the local array
-        // is guaranteed to reflect exactly what Supabase stored.
-        // Using Prefer: return=representation on PATCH returns the row.
+        // UPDATE — request the updated record back from Supabase so the
+        // local clients array reflects exactly what the database stored.
+        // Prefer: return=representation tells Supabase to return the row.
         const result = await sbFetch('PATCH',
           `/rest/v1/clients?id=eq.${data.id}`,
           row,
-          true // flag to request representation back
+          true // returnRepresentation = true
         );
-        return result && result[0] ? fromSupabase(result[0]) : data;
+        // result is an array from Supabase — take the first element.
+        // If Supabase returns nothing, re-fetch the specific row to get current state.
+        if (result && Array.isArray(result) && result.length > 0) {
+          return fromSupabase(result[0]);
+        }
+        // Fallback: fetch the row directly to guarantee we have fresh data
+        const fetched = await sbFetch('GET', `/rest/v1/clients?id=eq.${data.id}&select=*`);
+        return fetched && fetched[0] ? fromSupabase(fetched[0]) : fromSupabase(row);
       }
     } else {
       // localStorage fallback
