@@ -1464,14 +1464,18 @@ function onAuthSuccess(skipWelcome = false) {
     // Returning user — skip the welcome, go straight to the app
     showAppState(true);
     loadClients();
-    // Track session start after clients load (client_count added in loadClients)
-    track('session_started', null, { returning: true });
+    // Delay tracking until session is fully established in Supabase.
+    // Firing immediately causes a 403 because the session token hasn't
+    // propagated yet on the first call after a URL-hash confirmation login.
+    setTimeout(() => track('session_started', null, { returning: skipWelcome }), 2000);
   } else {
     // New confirmation — show a brief welcome moment
     showPanel('welcome');
     setTimeout(() => {
       showAppState(true);
       loadClients();
+      // Track after welcome animation — session is definitely ready by now
+      setTimeout(() => track('session_started', null, { returning: false }), 1000);
     }, 4000); // 4 seconds — enough to read and feel the positive affirmation
   }
 }
@@ -1483,6 +1487,16 @@ function showAppState(loggedIn) {
   document.getElementById('toolbar').style.display    = loggedIn ? 'flex'  : 'none';
   document.getElementById('main').style.display       = loggedIn ? 'block' : 'none';
   document.getElementById('footer').style.display     = loggedIn ? 'flex'  : 'none';
+
+  // When returning to auth screen (logout), always reset to sign-in panel
+  // and hide the welcome panel — prevents welcome animation showing on logout
+  if (!loggedIn) {
+    document.getElementById('welcomePanel').style.display  = 'none';
+    document.getElementById('signInPanel').style.display   = 'block';
+    document.getElementById('signUpPanel').style.display   = 'none';
+    document.getElementById('confirmPanel').style.display  = 'none';
+    document.getElementById('authError').classList.remove('show');
+  }
 
   // Populate user info in topbar
   if (loggedIn && currentUser) {
@@ -2439,20 +2453,31 @@ function showPanel(panel, email) {
     // sit in the address bar or browser history after use
     history.replaceState(null, '', window.location.pathname);
 
-    // Build a minimal session object from the URL tokens
-    // We also need the user details — fetch them from Supabase
+    // Exchange the URL tokens for a full verified session by fetching
+    // the user object. The access_token from the URL is valid but we
+    // need to build a complete session object that matches what Supabase
+    // returns from a normal password login — including token_type.
     fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: {
         'apikey':        SUPABASE_ANON_KEY,
         'Authorization': `Bearer ${accessToken}`,
       }
     })
-    .then(r => r.json())
+    .then(r => {
+      if (!r.ok) throw new Error('Token exchange failed');
+      return r.json();
+    })
     .then(user => {
-      // Set up the session with the tokens from the URL
-      currentSession = { access_token: accessToken, refresh_token: refreshToken };
-      currentUser    = user;
-      onAuthSuccess(false); // false = show welcome moment (new user)
+      // Build a complete session object — token_type is required for
+      // all subsequent authenticated Supabase API calls to work correctly.
+      // Without it, DB inserts and tracking calls return 403/permission denied.
+      currentSession = {
+        access_token:  accessToken,
+        refresh_token: refreshToken,
+        token_type:    'bearer',
+      };
+      currentUser = user;
+      onAuthSuccess(false); // false = show welcome animation (new user)
     })
     .catch(() => {
       // Token exchange failed — fall back to sign in screen
