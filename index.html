@@ -1379,7 +1379,7 @@ async function refreshSession() {
     currentSession = null;
     clients        = [];
     localStorage.removeItem('cwc-session');
-    showToast('Session expired — please sign in again.', 'amber');
+    showToast('Session expired — please sign in again.');
     setTimeout(() => showAppState(false), 2000);
     return;
   }
@@ -1419,7 +1419,7 @@ async function refreshSession() {
     currentSession = null;
     clients        = [];
     localStorage.removeItem('cwc-session');
-    showToast('Session expired — please sign in again.', 'amber');
+    showToast('Session expired — please sign in again.');
     setTimeout(() => showAppState(false), 2500);
   }
 }
