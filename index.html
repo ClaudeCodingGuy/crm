@@ -528,6 +528,19 @@ body {
   flex-shrink: 0; margin-top: 1px;
 }
 
+/* Source badge — shown on cards created via webhook (Tally, Typeform, etc.) */
+.source-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 6px; border-radius: 4px;
+  font-family: var(--ff-mono); font-size: 9px; font-weight: 500;
+  letter-spacing: .04em; text-transform: uppercase;
+  background: #e8f0f7; color: #3a6b9f;
+  border: 1px solid #c5d9ed;
+  flex-shrink: 0;
+}
+.source-badge.tally   { background: #f0eaff; color: #6b3fa0; border-color: #d9c5f5; }
+.source-badge.typeform { background: #e8f7f0; color: #276749; border-color: #b8e2cc; }
+
 /* ── TABLE VIEW ──────────────────────────────────────────────
    Standard data table. Sorted by overdue first, then value.
    Clicking a row opens the edit modal.
@@ -1241,6 +1254,7 @@ function toSupabase(c, userId) {
     tags:     c.tags     || [],  // stored as a PostgreSQL text[] array
     action:   c.action   || null,
     notes:    c.notes    || null,
+    source:   c.source   || null, // null = manual, 'tally' = via webhook
     // NOTE: created_at and updated_at are set automatically by the database
     // TO ADD A FIELD: add it here, matching the SQL column name exactly
   };
@@ -1263,6 +1277,7 @@ function fromSupabase(row) {
     tags:    row.tags    || [],
     action:  row.action  || '',
     notes:   row.notes   || '',
+    source:  row.source  || null, // null = manual, 'tally' = via Tally webhook
     // TO ADD A FIELD: add it here, matching the JS property name you want
   };
 }
@@ -1886,6 +1901,12 @@ function cardHTML(c) {
         <span class="action-text">${esc(c.action || 'No next action set')}</span>
         <span class="owner-avatar">${esc(c.owner || '?')}</span>
       </div>
+      ${c.source ? `
+      <div style="padding: 0 14px 10px; display:flex; gap:6px; flex-wrap:wrap">
+        <span class="source-badge ${esc(c.source)}">
+          ${c.source === 'tally' ? '⚡ from Tally' : `⚡ from ${esc(c.source)}`}
+        </span>
+      </div>` : ''}
     </div>`;
 }
 
