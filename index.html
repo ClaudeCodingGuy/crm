@@ -1063,9 +1063,15 @@ const DB = {
         // Return the created record (with Supabase-generated id)
         return fromSupabase(Array.isArray(result) ? result[0] : result);
       } else {
-        // UPDATE — target the specific row by id
-        await sbFetch('PATCH', `/rest/v1/clients?id=eq.${data.id}`, row);
-        return data; // return unchanged (update doesn't return the row)
+        // UPDATE — fetch back the updated record so the local array
+        // is guaranteed to reflect exactly what Supabase stored.
+        // Using Prefer: return=representation on PATCH returns the row.
+        const result = await sbFetch('PATCH',
+          `/rest/v1/clients?id=eq.${data.id}`,
+          row,
+          true // flag to request representation back
+        );
+        return result && result[0] ? fromSupabase(result[0]) : data;
       }
     } else {
       // localStorage fallback
@@ -1255,16 +1261,19 @@ function fromSupabase(row) {
 }
 
 // Make an authenticated HTTP request to the Supabase REST API.
-// method  — 'GET', 'POST', 'PATCH', 'DELETE'
-// path    — the API path, e.g. '/rest/v1/clients?select=*'
-// body    — JavaScript object to send as JSON (optional)
-async function sbFetch(method, path, body) {
+// method             — 'GET', 'POST', 'PATCH', 'DELETE'
+// path               — the API path, e.g. '/rest/v1/clients?select=*'
+// body               — JavaScript object to send as JSON (optional)
+// returnRepresentation — if true, ask Supabase to return the modified row(s)
+async function sbFetch(method, path, body, returnRepresentation = false) {
   const headers = {
     'Content-Type':  'application/json',
     'apikey':        SUPABASE_ANON_KEY,
     'Authorization': `Bearer ${currentSession?.access_token || SUPABASE_ANON_KEY}`,
-    // 'return=representation' makes POST return the created row
-    'Prefer': method === 'POST' ? 'return=representation' : 'return=minimal',
+    // 'return=representation' makes POST and PATCH return the created/updated row
+    'Prefer': (method === 'POST' || returnRepresentation)
+      ? 'return=representation'
+      : 'return=minimal',
   };
 
   const response = await fetch(SUPABASE_URL + path, {
