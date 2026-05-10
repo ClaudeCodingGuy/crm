@@ -1328,15 +1328,128 @@ async function sbFetch(method, path, body, returnRepresentation = false) {
    On app start, init() checks for a saved session and skips
    the login screen if one exists.
 
-   The access_token eventually expires (default: 1 hour) but
-   Supabase also returns a refresh_token that can get a new one.
-   For simplicity we don't implement refresh here — the user
-   will just need to sign in again after it expires.
+   The access_token expires after 1 hour. We silently refresh it
+   every 50 minutes using the refresh_token. Activity tracking
+   (clicks and keypresses) resets the timer so active users are
+   never interrupted. On refresh failure, the user sees a gentle
+   message and is returned to the login screen.
+
+   startSessionRefresh() must be called after every successful login
+   and when restoring a saved session on page load.
    ============================================================ */
 
 // These are module-level variables — available to all functions
 let currentUser    = null;  // the logged-in user object
 let currentSession = null;  // the auth session (contains access_token)
+
+// ── SESSION REFRESH ───────────────────────────────────────────
+// Supabase access tokens expire after 1 hour. We refresh silently
+// every 50 minutes so active users are never logged out mid-session.
+//
+// Architecture:
+//   sessionRefreshTimer   — the setInterval handle (so we can clear it on logout)
+//   lastActivityTime      — updated on every click/keypress
+//   SESSION_REFRESH_MS    — how often to refresh (50 minutes)
+//   SESSION_IDLE_LIMIT_MS — how long idle before we stop refreshing and let it expire
+//
+const SESSION_REFRESH_MS    = 50 * 60 * 1000; // 50 minutes
+const SESSION_IDLE_LIMIT_MS = 60 * 60 * 1000; // 60 minutes idle = truly expired
+
+let sessionRefreshTimer  = null;
+let lastActivityTime     = Date.now();
+
+// Track user activity — any click or keypress resets the idle clock
+function trackActivity() {
+  lastActivityTime = Date.now();
+}
+
+// Call Supabase to exchange the refresh_token for a new access_token.
+// Updates currentSession and localStorage on success.
+// On failure, clears the session and returns the user to login.
+async function refreshSession() {
+  if (!currentSession?.refresh_token) return;
+
+  // If user has been idle longer than SESSION_IDLE_LIMIT_MS, let the
+  // session expire naturally — don't silently refresh a stale session.
+  const idleTime = Date.now() - lastActivityTime;
+  if (idleTime > SESSION_IDLE_LIMIT_MS) {
+    console.log('Session idle — allowing expiry instead of refreshing.');
+    stopSessionRefresh();
+    currentUser    = null;
+    currentSession = null;
+    clients        = [];
+    localStorage.removeItem('cwc-session');
+    showToast('Session expired — please sign in again.', 'amber');
+    setTimeout(() => showAppState(false), 2000);
+    return;
+  }
+
+  try {
+    const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+      body:    JSON.stringify({ refresh_token: currentSession.refresh_token }),
+    });
+
+    if (!response.ok) throw new Error('Refresh failed');
+
+    const data = await response.json();
+
+    // Update session with new tokens
+    currentSession = {
+      access_token:  data.access_token,
+      refresh_token: data.refresh_token || currentSession.refresh_token,
+      token_type:    data.token_type || 'bearer',
+    };
+    if (data.user) currentUser = data.user;
+
+    // Persist the refreshed session
+    localStorage.setItem('cwc-session', JSON.stringify({
+      session: currentSession,
+      user:    currentUser,
+    }));
+
+    console.log('Session refreshed silently at', new Date().toLocaleTimeString());
+
+  } catch (e) {
+    // Refresh token is invalid or expired — force sign out
+    console.warn('Session refresh failed:', e.message);
+    stopSessionRefresh();
+    currentUser    = null;
+    currentSession = null;
+    clients        = [];
+    localStorage.removeItem('cwc-session');
+    showToast('Session expired — please sign in again.', 'amber');
+    setTimeout(() => showAppState(false), 2500);
+  }
+}
+
+// Start the recurring refresh timer and activity listeners.
+// Call this once after every successful login or session restore.
+function startSessionRefresh() {
+  stopSessionRefresh(); // clear any existing timer first
+
+  // Refresh every 50 minutes
+  sessionRefreshTimer = setInterval(refreshSession, SESSION_REFRESH_MS);
+
+  // Track activity on click and keypress — resets lastActivityTime
+  document.addEventListener('click',   trackActivity, { passive: true });
+  document.addEventListener('keydown', trackActivity, { passive: true });
+
+  lastActivityTime = Date.now(); // reset on start
+  console.log('Session refresh started — will refresh every 50 minutes.');
+}
+
+// Stop the refresh timer and remove activity listeners.
+// Call this on sign out or session expiry.
+function stopSessionRefresh() {
+  if (sessionRefreshTimer) {
+    clearInterval(sessionRefreshTimer);
+    sessionRefreshTimer = null;
+  }
+  document.removeEventListener('click',   trackActivity);
+  document.removeEventListener('keydown', trackActivity);
+}
 
 // Called when user clicks "Sign In"
 async function signIn() {
@@ -1481,8 +1594,9 @@ async function signOut() {
   currentUser    = null;
   currentSession = null;
   clients        = [];
-  localStorage.removeItem('cwc-session');    // remove saved session
-  localStorage.removeItem('cwc-auth-event'); // remove cross-tab sync marker
+  stopSessionRefresh();                          // stop the refresh timer and activity listeners
+  localStorage.removeItem('cwc-session');        // remove saved session
+  localStorage.removeItem('cwc-auth-event');     // remove cross-tab sync marker
 
   showAppState(false); // return to login screen
 }
@@ -1496,6 +1610,10 @@ function onAuthSuccess(skipWelcome = false) {
     session: currentSession,
     user:    currentUser,
   }));
+
+  // Start the silent 50-minute refresh cycle — keeps session alive
+  // as long as the user is active. Must be called after every login.
+  startSessionRefresh();
 
   // Broadcast login to any other open tabs (e.g. the original
   // "Check your email" tab that's still open)
@@ -2498,9 +2616,11 @@ function showPanel(panel, email) {
       Show the auth screen.
 
    NOTE ON SESSION EXPIRY:
-   Supabase access tokens expire after 1 hour. If expired,
-   the first DB call will fail and the user must sign in again.
-   A future improvement would implement refresh token rotation.
+   Supabase access tokens expire after 1 hour. v11 implements silent
+   refresh — startSessionRefresh() runs a 50-minute interval that
+   exchanges the refresh_token for a new access_token. Activity tracking
+   (click/keypress) resets the idle clock. If the user is idle for 60+
+   minutes the session is allowed to expire gracefully.
    ============================================================ */
 (function init() {
 
@@ -2562,8 +2682,9 @@ function showPanel(panel, email) {
       if (session && user) {
         currentSession = session;
         currentUser    = user;
-        showAppState(true);   // show app immediately
-        loadClients();        // fetch data in background
+        showAppState(true);      // show app immediately
+        loadClients();           // fetch data in background
+        startSessionRefresh();   // resume silent refresh for restored session
         return;
       }
     } catch (e) {
