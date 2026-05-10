@@ -1993,7 +1993,7 @@ function handleOverlayClick(e) {
 // Future: make this a user preference in account settings (auto-save on Enter vs not).
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
-  if (document.getElementById('modalOverlay').style.display === 'none') return;
+  if (!document.getElementById('modalOverlay').classList.contains('open')) return;
   const tag = document.activeElement.tagName.toLowerCase();
   if (tag === 'textarea' || tag === 'select') return;
   e.preventDefault();
