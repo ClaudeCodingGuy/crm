@@ -3,38 +3,44 @@
 <!--
   ============================================================
   CLAUDECODINGGUY · DELIVERY CRM
-  Version: 3.0 — Supabase Backend + Auth
+  Version: v12 — Notification Queue (Pending Leads)
   ------------------------------------------------------------
-  FILE STRUCTURE (everything lives here for now — see note
-  at bottom on when/how to split into multiple files):
+  WHAT'S NEW IN v12:
+  • Pending lead notification queue — leads from Tally webhooks
+    land in a `pending_leads` table and surface in a tray rather
+    than auto-creating clients (prevents accidental pollution
+    of the active board).
+  • Topbar badge + slide-in tray with Accept / Dismiss actions.
+  • Case-insensitive duplicate name detection on Accept.
+  • 30-second polling for new leads (Phase 1). Phase 2 will
+    upgrade to Supabase Realtime — see TODO in SECTION 5B.
+  • Pulse animation when a new lead arrives mid-session.
+  • New analytics events: lead_accepted, lead_dismissed.
 
+  PRESERVED FROM v11 (unchanged):
+  • Session refresh (50min interval, idle-aware)
+  • Activity tracking (click/keypress)
+  • Ink-drop welcome animation
+  • Drag-drop, modal, source badges, demo data
+  • Repository pattern + BACKEND swap line
+  • Cross-tab auth sync
+
+  FILE STRUCTURE:
     1. CONFIGURATION        — your keys and backend switch
     2. CSS STYLES           — all visual design
     3. HTML MARKUP          — the page structure
     4. DATA LAYER (DB)      — all reads/writes in one place
     5. SUPABASE HELPERS     — low-level API calls
+    5A. ANALYTICS           — track() and stage history
+    5B. NOTIFICATION QUEUE  — pending_leads data layer (NEW v12)
     6. AUTH                 — sign in, sign up, sign out
     7. APP STATE            — client data, filters, view mode
     8. RENDER FUNCTIONS     — board view, table view, cards
+    8B. NOTIFICATION RENDER — badge, tray, time formatting (NEW v12)
     9. MODAL                — add/edit client form
    10. DRAG AND DROP        — moving cards between columns
    11. KEYBOARD SHORTCUTS   — N, /, Escape
    12. INIT                 — startup logic
-
-  WHY ONE FILE?
-  Browsers can't load local files from other local files due
-  to security rules. Since we deploy a single HTML file to
-  GitHub Pages, one file is the pragmatic choice at this
-  scale. The sections above mirror what would be separate
-  files in a professional project (auth.js, db.js, etc).
-  When ready to split, see the Claude Code note at the bottom.
-
-  ADDING NEW FEATURES:
-  - New card field?  → Add column in SQL, add field in modal,
-                       add to toSupabase() and fromSupabase()
-  - New table?       → Write a new SQL migration (don't
-                       recreate the whole schema)
-  - New page/view?   → Add a render function + nav button
   ============================================================
 -->
 <html lang="en">
@@ -44,163 +50,59 @@
 <title>ClaudeCodingGuy · Delivery</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<!--
-  THREE FONTS:
-  - Fraunces  → display/headings (editorial serif)
-  - Inter     → body text (clean, readable)
-  - JetBrains Mono → labels, stats, meta (monospace precision)
--->
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;1,9..144,300;1,9..144,400&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
 /* ============================================================
    SECTION 2: CSS STYLES
-   Design tokens (colors, fonts, spacing) are defined as CSS
-   custom properties (variables) in :root so they can be
-   changed in one place and affect the entire app.
-   This is the foundation of any future theming/SDK feature.
    ============================================================ */
-
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* COLOR PALETTE — change these to retheme the entire app */
-  --paper:    #F5F1EA;   /* warm background */
-  --paper-2:  #EDE8DF;   /* slightly darker paper, for hover/secondary bg */
-  --paper-3:  #E4DDD2;   /* even darker, for column backgrounds */
-  --border:   #D8D1C6;   /* default border color */
-  --border-2: #C8C0B4;   /* darker border, for hover states */
-  --ink:      #1B1B1B;   /* primary text — near black */
-  --ink-2:    #4A4540;   /* secondary text */
-  --ink-3:    #7A736A;   /* muted text — labels, placeholders */
-  --ink-4:    #A8A09A;   /* very muted — footer, timestamps */
-  --teal:     #2F4F4F;   /* primary action color */
-  --teal-2:   #3d6464;   /* teal hover state */
-  --teal-3:   #e8f0f0;   /* teal background tint */
-  --red:      #C8362A;   /* danger: overdue, at-risk, errors */
-  --red-2:    #FAE9E7;   /* red background tint */
-  --red-3:    #f5d0cd;   /* red border tint */
-  --green:    #4A7C59;   /* healthy status */
-  --green-2:  #EAF2ED;   /* green background tint */
-  --amber:    #C68A2E;   /* watch status, warnings */
-  --amber-2:  #FBF0DC;   /* amber background tint */
+  --paper:    #F5F1EA; --paper-2:  #EDE8DF; --paper-3:  #E4DDD2;
+  --border:   #D8D1C6; --border-2: #C8C0B4;
+  --ink:      #1B1B1B; --ink-2:    #4A4540; --ink-3:    #7A736A; --ink-4:    #A8A09A;
+  --teal:     #2F4F4F; --teal-2:   #3d6464; --teal-3:   #e8f0f0;
+  --red:      #C8362A; --red-2:    #FAE9E7; --red-3:    #f5d0cd;
+  --green:    #4A7C59; --green-2:  #EAF2ED;
+  --amber:    #C68A2E; --amber-2:  #FBF0DC;
   --white:    #FFFFFF;
-
-  /* SHADOWS — layered for depth */
   --shadow-sm: 0 1px 2px rgba(27,27,27,.06), 0 1px 4px rgba(27,27,27,.04);
   --shadow:    0 2px 8px rgba(27,27,27,.08), 0 1px 3px rgba(27,27,27,.06);
   --shadow-lg: 0 8px 32px rgba(27,27,27,.14), 0 2px 8px rgba(27,27,27,.08);
-
-  /* BORDER RADIUS */
-  --r:    6px;   /* small elements: inputs, badges */
-  --r-lg: 10px;  /* cards, columns */
-  --r-xl: 14px;  /* modals */
-
-  /* TYPOGRAPHY */
+  --r:    6px; --r-lg: 10px; --r-xl: 14px;
   --ff-display: 'Fraunces', Georgia, serif;
   --ff-body:    'Inter', system-ui, sans-serif;
   --ff-mono:    'JetBrains Mono', 'Courier New', monospace;
 }
 
 html, body { height: 100%; overflow: hidden; }
-body {
-  font-family: var(--ff-body);
-  background: var(--paper);
-  color: var(--ink);
-  font-size: 14px;
-  line-height: 1.5;
-}
+body { font-family: var(--ff-body); background: var(--paper); color: var(--ink); font-size: 14px; line-height: 1.5; }
 
-/* ── AUTH SCREEN ─────────────────────────────────────────────
-   Shown when the user is not logged in. Sits on top of
-   everything with position:fixed and z-index:2000.
-   Hidden once auth succeeds via showAppState(true).
-   ─────────────────────────────────────────────────────────── */
-.auth-screen {
-  position: fixed; inset: 0;
-  background: var(--paper);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 2000; padding: 20px;
-}
-.auth-box {
-  background: var(--white);
-  border: 1px solid var(--border);
-  border-radius: var(--r-xl);
-  padding: 40px; width: 100%; max-width: 400px;
-  box-shadow: var(--shadow-lg);
-  position: relative; /* needed so welcome panel covers the box exactly */
-}
-.auth-logo {
-  font-family: var(--ff-display);
-  font-size: 24px; font-weight: 300; font-style: italic;
-  color: var(--ink); margin-bottom: 4px;
-}
-.auth-sub {
-  font-family: var(--ff-mono); font-size: 10px;
-  letter-spacing: .08em; text-transform: uppercase;
-  color: var(--ink-3); margin-bottom: 32px;
-}
-.auth-title {
-  font-family: var(--ff-display);
-  font-size: 20px; font-weight: 400;
-  margin-bottom: 20px; color: var(--ink);
-}
-/* Error banner — hidden by default, shown via .show class */
-.auth-error {
-  background: var(--red-2); border: 1px solid var(--red-3);
-  border-radius: var(--r); padding: 10px 14px;
-  font-size: 13px; color: var(--red);
-  margin-bottom: 16px; display: none;
-}
+/* ── AUTH SCREEN ─────────────────────────────────────────── */
+.auth-screen { position: fixed; inset: 0; background: var(--paper); display: flex; align-items: center; justify-content: center; z-index: 2000; padding: 20px; }
+.auth-box { background: var(--white); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 40px; width: 100%; max-width: 400px; box-shadow: var(--shadow-lg); position: relative; }
+.auth-logo { font-family: var(--ff-display); font-size: 24px; font-weight: 300; font-style: italic; color: var(--ink); margin-bottom: 4px; }
+.auth-sub { font-family: var(--ff-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 32px; }
+.auth-title { font-family: var(--ff-display); font-size: 20px; font-weight: 400; margin-bottom: 20px; color: var(--ink); }
+.auth-error { background: var(--red-2); border: 1px solid var(--red-3); border-radius: var(--r); padding: 10px 14px; font-size: 13px; color: var(--red); margin-bottom: 16px; display: none; }
 .auth-error.show { display: block; }
 .auth-form { display: flex; flex-direction: column; gap: 14px; }
 .auth-switch { font-size: 13px; color: var(--ink-3); text-align: center; margin-top: 8px; }
-.auth-switch button {
-  background: none; border: none; color: var(--teal);
-  cursor: pointer; font-size: 13px; text-decoration: underline;
-}
+.auth-switch button { background: none; border: none; color: var(--teal); cursor: pointer; font-size: 13px; text-decoration: underline; }
 
-/* ── SHARED FORM ELEMENTS ────────────────────────────────────
-   Used in both the auth screen and the client modal.
-   ─────────────────────────────────────────────────────────── */
+/* ── SHARED FORM ELEMENTS ────────────────────────────────── */
 .form-group { display: flex; flex-direction: column; gap: 5px; }
-.form-group.full { grid-column: 1 / -1; } /* spans both columns in the modal grid */
-.form-label {
-  font-family: var(--ff-mono); font-size: 9px;
-  letter-spacing: .09em; text-transform: uppercase;
-  color: var(--ink-3);
-}
-.form-input, .form-select, .form-textarea {
-  padding: 9px 12px;
-  background: var(--paper); border: 1px solid var(--border);
-  border-radius: var(--r); font-family: var(--ff-body);
-  font-size: 13px; color: var(--ink); outline: none;
-  transition: border-color .15s;
-}
-.form-input:focus, .form-select:focus, .form-textarea:focus {
-  border-color: var(--teal);
-  box-shadow: 0 0 0 3px rgba(47,79,79,.08);
-}
+.form-group.full { grid-column: 1 / -1; }
+.form-label { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); }
+.form-input, .form-select, .form-textarea { padding: 9px 12px; background: var(--paper); border: 1px solid var(--border); border-radius: var(--r); font-family: var(--ff-body); font-size: 13px; color: var(--ink); outline: none; transition: border-color .15s; }
+.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(47,79,79,.08); }
 .form-input::placeholder { color: var(--ink-4); }
-/* Custom arrow for select dropdowns */
-.form-select {
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237A736A' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 10px center;
-  padding-right: 28px; background-color: var(--paper);
-}
+.form-select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237A736A' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px; background-color: var(--paper); }
 .form-textarea { resize: vertical; min-height: 72px; line-height: 1.5; }
 
-/* ── BUTTONS ─────────────────────────────────────────────────
-   Base .btn class + modifier classes for variants.
-   This pattern (BEM-like) makes it easy to add new variants.
-   ─────────────────────────────────────────────────────────── */
-.btn {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 14px; border-radius: var(--r);
-  font-family: var(--ff-body); font-size: 13px; font-weight: 500;
-  cursor: pointer; border: none; transition: all .15s; white-space: nowrap;
-}
+/* ── BUTTONS ─────────────────────────────────────────────── */
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: var(--r); font-family: var(--ff-body); font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: all .15s; white-space: nowrap; }
 .btn svg { width: 14px; height: 14px; flex-shrink: 0; }
 .btn-ghost   { background: var(--white); color: var(--ink-2); border: 1px solid var(--border); }
 .btn-ghost:hover { background: var(--paper-2); border-color: var(--border-2); }
@@ -210,470 +112,270 @@ body {
 .btn-danger  { background: var(--red); color: #fff; }
 .btn-danger:hover { background: #b02e23; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
-/* Full-width button (used in auth form) */
 .btn-full { width: 100%; justify-content: center; }
 
-/* ── TOPBAR ──────────────────────────────────────────────────
-   Fixed at the top. Contains: brand, live stats, user info.
-   Height is 56px — the .main content area starts below this.
-   ─────────────────────────────────────────────────────────── */
-.topbar {
-  height: 56px; background: var(--white);
-  border-bottom: 1px solid var(--border);
-  display: flex; align-items: center;
-  padding: 0 20px; gap: 20px;
-  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-}
+/* ── TOPBAR ──────────────────────────────────────────────── */
+.topbar { height: 56px; background: var(--white); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 20px; gap: 20px; position: fixed; top: 0; left: 0; right: 0; z-index: 100; }
 .brand { display: flex; align-items: baseline; gap: 8px; flex-shrink: 0; }
-.brand-name {
-  font-family: var(--ff-display); font-size: 17px;
-  font-weight: 400; color: var(--ink); letter-spacing: .01em;
-}
+.brand-name { font-family: var(--ff-display); font-size: 17px; font-weight: 400; color: var(--ink); letter-spacing: .01em; }
 .brand-sep { color: var(--ink-4); font-size: 11px; }
-.brand-sub {
-  font-family: var(--ff-mono); font-size: 10px;
-  color: var(--ink-3); letter-spacing: .08em; text-transform: uppercase;
-}
-/* Live stats — four numbers in the top right */
+.brand-sub { font-family: var(--ff-mono); font-size: 10px; color: var(--ink-3); letter-spacing: .08em; text-transform: uppercase; }
 .topbar-stats { display: flex; gap: 2px; margin-left: auto; }
-.ts {
-  display: flex; flex-direction: column; align-items: center;
-  padding: 6px 14px; border-radius: var(--r); cursor: default;
-}
-.ts-num {
-  font-family: var(--ff-display); font-size: 20px;
-  font-weight: 400; line-height: 1; color: var(--ink);
-}
-.ts-label {
-  font-family: var(--ff-mono); font-size: 9px;
-  letter-spacing: .07em; text-transform: uppercase;
-  color: var(--ink-3); margin-top: 1px; white-space: nowrap;
-}
-/* .alert class added by JS when count > 0 for overdue/risk */
+.ts { display: flex; flex-direction: column; align-items: center; padding: 6px 14px; border-radius: var(--r); cursor: default; }
+.ts-num { font-family: var(--ff-display); font-size: 20px; font-weight: 400; line-height: 1; color: var(--ink); }
+.ts-label { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); margin-top: 1px; white-space: nowrap; }
 .ts.alert .ts-num, .ts.alert .ts-label { color: var(--red); }
 
-/* User info section — right side of topbar */
-.user-menu {
-  display: flex; align-items: center; gap: 8px;
-  padding-left: 12px; border-left: 1px solid var(--border);
-}
-.user-avatar {
-  width: 30px; height: 30px; border-radius: 50%;
-  background: var(--teal-3); color: var(--teal);
-  display: flex; align-items: center; justify-content: center;
-  font-family: var(--ff-mono); font-size: 11px; font-weight: 500;
-}
-.user-email {
-  font-size: 12px; color: var(--ink-3);
-  max-width: 160px; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap;
-}
-.signout-btn {
-  font-family: var(--ff-mono); font-size: 10px;
-  letter-spacing: .04em; text-transform: uppercase;
-  padding: 4px 10px; border-radius: var(--r);
-  border: 1px solid var(--border); background: transparent;
-  color: var(--ink-3); cursor: pointer; transition: all .15s;
-}
+.user-menu { display: flex; align-items: center; gap: 8px; padding-left: 12px; border-left: 1px solid var(--border); }
+.user-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--teal-3); color: var(--teal); display: flex; align-items: center; justify-content: center; font-family: var(--ff-mono); font-size: 11px; font-weight: 500; }
+.user-email { font-size: 12px; color: var(--ink-3); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.signout-btn { font-family: var(--ff-mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; padding: 4px 10px; border-radius: var(--r); border: 1px solid var(--border); background: transparent; color: var(--ink-3); cursor: pointer; transition: all .15s; }
 .signout-btn:hover { background: var(--red-2); color: var(--red); border-color: var(--red-3); }
 
-/* ── SYNC INDICATOR ──────────────────────────────────────────
-   Small dot + text showing real-time database sync status.
-   Three states: synced (green), syncing (amber pulse), error (red).
-   ─────────────────────────────────────────────────────────── */
-.sync-indicator {
-  display: flex; align-items: center; gap: 6px;
-  font-family: var(--ff-mono); font-size: 10px;
-  color: var(--ink-3); letter-spacing: .04em;
-}
+/* ── SYNC INDICATOR ──────────────────────────────────────── */
+.sync-indicator { display: flex; align-items: center; gap: 6px; font-family: var(--ff-mono); font-size: 10px; color: var(--ink-3); letter-spacing: .04em; }
 .sync-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 .sync-dot.syncing { background: var(--amber); animation: pulse-anim 1s infinite; }
 .sync-dot.error   { background: var(--red); }
 
-/* ── TOOLBAR ─────────────────────────────────────────────────
-   Fixed below the topbar (top: 56px). Contains: view toggle,
-   search, filter chips, export/demo/new buttons.
-   Height is variable — .main starts at top: 112px to clear both.
-   ─────────────────────────────────────────────────────────── */
-.toolbar {
-  position: fixed; top: 56px; left: 0; right: 0; z-index: 99;
-  background: var(--paper); border-bottom: 1px solid var(--border);
-  padding: 10px 20px; display: flex; align-items: center;
-  gap: 10px; flex-wrap: wrap;
+/* ── NOTIFICATION BADGE (v12) ──────────────────────────────
+   Pill in topbar, right of sync dot. Hidden when count=0:
+   a stale "0" is just visual noise. Teal (not red) signals
+   opportunity, not danger.
+   ────────────────────────────────────────────────────────── */
+.notify-badge {
+  display: none;
+  align-items: center; gap: 4px;
+  background: var(--teal); color: var(--white);
+  padding: 3px 9px; border-radius: 20px;
+  font-family: var(--ff-mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .02em;
+  cursor: pointer; user-select: none;
+  border: none; outline: none;
+  transition: background .15s, transform .15s;
+  flex-shrink: 0;
+  margin-left: 4px;
 }
-/* Board / Table toggle — pill-style button group */
-.view-toggle {
-  display: flex; background: var(--paper-2);
-  border-radius: var(--r); padding: 2px; gap: 2px;
+.notify-badge.has-leads { display: inline-flex; }
+.notify-badge:hover { background: var(--teal-2); }
+.notify-badge svg { width: 12px; height: 12px; }
+/* Pulse class applied for ~2s when a new lead arrives. Defined
+   separately from pulse-anim so timing/transform feel different. */
+.notify-badge.pulse { animation: pulse-notify 0.6s ease-in-out 3; }
+@keyframes pulse-notify {
+  0%, 100% { transform: scale(1);    box-shadow: 0 0 0 0 rgba(47,79,79,.5); }
+  50%      { transform: scale(1.12); box-shadow: 0 0 0 8px rgba(47,79,79,0); }
 }
-.vt-btn {
-  font-family: var(--ff-mono); font-size: 11px;
-  letter-spacing: .04em; text-transform: uppercase;
-  padding: 5px 12px; border-radius: 4px; border: none;
-  background: transparent; color: var(--ink-3);
-  cursor: pointer; transition: all .15s;
-  display: flex; align-items: center; gap: 6px;
+
+/* ── NOTIFICATION TRAY (v12) ───────────────────────────────
+   Slides in from the right. Lives at body level so z-index
+   works regardless of trigger location. Desktop 360px; mobile
+   full-width.
+   ────────────────────────────────────────────────────────── */
+.tray-overlay { position: fixed; inset: 0; background: rgba(27,27,27,.18); z-index: 1500; opacity: 0; pointer-events: none; transition: opacity .2s; }
+.tray-overlay.open { opacity: 1; pointer-events: all; }
+.notify-tray {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 360px; background: var(--paper);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  z-index: 1600;
+  display: flex; flex-direction: column;
+  transform: translateX(100%);
+  transition: transform .25s ease-out;
 }
+.notify-tray.open { transform: translateX(0); }
+.tray-header { padding: 18px 18px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-shrink: 0; background: var(--white); }
+.tray-title { font-family: var(--ff-display); font-size: 18px; font-weight: 400; color: var(--ink); flex: 1; display: flex; align-items: baseline; gap: 8px; }
+.tray-count { font-family: var(--ff-mono); font-size: 11px; color: var(--ink-3); background: var(--paper-2); padding: 2px 8px; border-radius: 20px; font-weight: 500; }
+.tray-close { width: 28px; height: 28px; border-radius: var(--r); border: 1px solid var(--border); background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--ink-3); transition: all .12s; flex-shrink: 0; }
+.tray-close:hover { background: var(--paper-2); color: var(--ink); }
+.tray-close svg { width: 14px; height: 14px; }
+.tray-bulk { padding: 10px 18px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; background: var(--white); flex-shrink: 0; }
+.tray-bulk .btn { flex: 1; justify-content: center; }
+.tray-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.tray-empty { padding: 60px 20px; text-align: center; color: var(--ink-3); font-size: 13px; line-height: 1.6; }
+.tray-empty-icon { margin-bottom: 14px; opacity: .35; }
+.tray-empty-icon svg { width: 40px; height: 40px; color: var(--teal); }
+
+/* ── PENDING LEAD CARD (v12) ───────────────────────────────
+   Lives in the tray. Shares DNA with the board card (rounded,
+   white, subtle shadow) but smaller and action-focused.
+   ────────────────────────────────────────────────────────── */
+.lead-card { background: var(--white); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 12px 14px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 8px; }
+.lead-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.lead-name { font-family: var(--ff-display); font-size: 14px; font-weight: 400; color: var(--ink); line-height: 1.25; flex: 1; }
+.lead-time { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .04em; color: var(--ink-4); white-space: nowrap; padding-top: 2px; }
+.lead-meta { display: flex; flex-wrap: wrap; gap: 8px 12px; font-size: 12px; color: var(--ink-2); }
+.lead-meta-item { display: flex; align-items: center; gap: 4px; }
+.lead-meta-label { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.lead-meta-value { font-family: var(--ff-mono); font-size: 11px; color: var(--ink-2); }
+.lead-actions { display: flex; gap: 6px; padding-top: 4px; border-top: 1px solid var(--paper-2); margin-top: 4px; }
+.lead-actions .btn { padding: 5px 10px; font-size: 11px; }
+.lead-details { display: none; margin-top: 6px; padding: 10px; background: var(--paper-2); border-radius: var(--r); font-size: 12px; line-height: 1.5; }
+.lead-details.open { display: block; }
+.lead-details-label { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin-bottom: 4px; }
+.lead-details-notes { color: var(--ink-2); margin-bottom: 8px; white-space: pre-wrap; word-break: break-word; }
+.lead-details-payload { font-family: var(--ff-mono); font-size: 10px; color: var(--ink-2); white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; background: var(--white); border: 1px solid var(--border); border-radius: var(--r); padding: 8px; }
+
+@media (max-width: 700px) {
+  .notify-tray { width: 100%; border-left: none; }
+}
+
+/* ── TOOLBAR ─────────────────────────────────────────────── */
+.toolbar { position: fixed; top: 56px; left: 0; right: 0; z-index: 99; background: var(--paper); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.view-toggle { display: flex; background: var(--paper-2); border-radius: var(--r); padding: 2px; gap: 2px; }
+.vt-btn { font-family: var(--ff-mono); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 5px 12px; border-radius: 4px; border: none; background: transparent; color: var(--ink-3); cursor: pointer; transition: all .15s; display: flex; align-items: center; gap: 6px; }
 .vt-btn svg { width: 13px; height: 13px; }
-.vt-btn.active {
-  background: var(--white); color: var(--ink);
-  box-shadow: var(--shadow-sm);
-}
-/* Search box */
+.vt-btn.active { background: var(--white); color: var(--ink); box-shadow: var(--shadow-sm); }
 .search-wrap { position: relative; flex: 1; min-width: 160px; max-width: 280px; }
-.search-wrap svg {
-  position: absolute; left: 9px; top: 50%;
-  transform: translateY(-50%); width: 14px; height: 14px;
-  color: var(--ink-3); pointer-events: none;
-}
-.search-input {
-  width: 100%; padding: 7px 10px 7px 30px;
-  background: var(--white); border: 1px solid var(--border);
-  border-radius: var(--r); font-family: var(--ff-body);
-  font-size: 13px; color: var(--ink); outline: none;
-  transition: border-color .15s;
-}
+.search-wrap svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--ink-3); pointer-events: none; }
+.search-input { width: 100%; padding: 7px 10px 7px 30px; background: var(--white); border: 1px solid var(--border); border-radius: var(--r); font-family: var(--ff-body); font-size: 13px; color: var(--ink); outline: none; transition: border-color .15s; }
 .search-input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(47,79,79,.08); }
 .search-input::placeholder { color: var(--ink-4); }
-/* Filter chips — each filters the board/table when active */
 .filter-chips { display: flex; gap: 6px; }
-.chip {
-  font-family: var(--ff-mono); font-size: 10px; letter-spacing: .04em;
-  padding: 5px 10px; border-radius: 20px;
-  border: 1px solid var(--border); background: var(--white);
-  color: var(--ink-3); cursor: pointer; transition: all .15s;
-  display: flex; align-items: center; gap: 5px; white-space: nowrap;
-}
-.chip-count {
-  background: var(--paper-2); color: var(--ink-2);
-  font-size: 9px; padding: 1px 5px;
-  border-radius: 20px; font-weight: 500;
-}
-/* Color-coded chip active states */
+.chip { font-family: var(--ff-mono); font-size: 10px; letter-spacing: .04em; padding: 5px 10px; border-radius: 20px; border: 1px solid var(--border); background: var(--white); color: var(--ink-3); cursor: pointer; transition: all .15s; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.chip-count { background: var(--paper-2); color: var(--ink-2); font-size: 9px; padding: 1px 5px; border-radius: 20px; font-weight: 500; }
 .chip.active { background: var(--teal); color: #F5F1EA; border-color: var(--teal); }
 .chip.active .chip-count { background: rgba(245,241,234,.2); color: #F5F1EA; }
 .chip.chip-red.active,  .chip.chip-red:hover  { background: var(--red);   border-color: var(--red);   color: #fff; }
 .chip.chip-amber.active,.chip.chip-amber:hover { background: var(--amber); border-color: var(--amber); color: #fff; }
 .chip.chip-red.active .chip-count,  .chip.chip-red:hover .chip-count,
-.chip.chip-amber.active .chip-count,.chip.chip-amber:hover .chip-count {
-  background: rgba(255,255,255,.2); color: #fff;
-}
+.chip.chip-amber.active .chip-count,.chip.chip-amber:hover .chip-count { background: rgba(255,255,255,.2); color: #fff; }
 .toolbar-right { margin-left: auto; display: flex; gap: 8px; }
 
-/* ── MAIN CONTENT AREA ───────────────────────────────────────
-   Fixed below both the topbar (56px) and toolbar (~56px).
-   Scrolls independently so the bars stay pinned.
-   ─────────────────────────────────────────────────────────── */
+/* ── MAIN CONTENT AREA ───────────────────────────────────── */
 .main { position: fixed; top: 112px; left: 0; right: 0; bottom: 36px; overflow-y: auto; overflow-x: hidden; }
 
-/* ── LOADING SCREEN ──────────────────────────────────────────
-   Shown while clients are being fetched from Supabase.
-   Replaced by board/table/empty once data arrives.
-   ─────────────────────────────────────────────────────────── */
-.loading-screen {
-  display: flex; flex-direction: column; align-items: center;
-  justify-content: center; height: 100%; gap: 16px;
-}
-.spinner {
-  width: 32px; height: 32px;
-  border: 2px solid var(--border);
-  border-top-color: var(--teal);
-  border-radius: 50%;
-  animation: spin .7s linear infinite;
-}
+/* ── LOADING + EMPTY STATES ──────────────────────────────── */
+.loading-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 16px; }
+.spinner { width: 32px; height: 32px; border: 2px solid var(--border); border-top-color: var(--teal); border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-.loading-text {
-  font-family: var(--ff-mono); font-size: 11px;
-  letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3);
-}
-
-/* ── EMPTY STATE ─────────────────────────────────────────────
-   Shown when the user is logged in but has no clients yet.
-   Two CTAs: load demo data, or add first client.
-   ─────────────────────────────────────────────────────────── */
-.empty-state {
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  height: 100%; min-height: 400px;
-  padding: 40px 20px; text-align: center;
-}
+.loading-text { font-family: var(--ff-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 400px; padding: 40px 20px; text-align: center; }
 .empty-icon { margin-bottom: 24px; opacity: .2; }
 .empty-icon svg { width: 64px; height: 64px; color: var(--teal); }
-.empty-h {
-  font-family: var(--ff-display); font-size: 28px;
-  font-weight: 300; color: var(--ink); margin-bottom: 10px; line-height: 1.25;
-}
+.empty-h { font-family: var(--ff-display); font-size: 28px; font-weight: 300; color: var(--ink); margin-bottom: 10px; line-height: 1.25; }
 .empty-sub { color: var(--ink-3); font-size: 14px; margin-bottom: 28px; max-width: 360px; line-height: 1.6; }
 .empty-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 
-/* ── BOARD VIEW ──────────────────────────────────────────────
-   Horizontal scrolling flex row of columns.
-   Each column is 272px wide with fixed sizing.
-   Drag-and-drop is handled in JavaScript below.
-   ─────────────────────────────────────────────────────────── */
-.board {
-  display: flex; gap: 14px; padding: 20px;
-  min-height: 100%; align-items: flex-start;
-  min-width: max-content; /* allows horizontal scroll when columns overflow */
-}
-.column {
-  width: 272px; flex-shrink: 0;
-  background: var(--paper-2); border-radius: var(--r-lg);
-  border: 1px solid var(--border);
-  display: flex; flex-direction: column; min-height: 200px;
-}
-.col-header {
-  padding: 12px 14px 10px;
-  display: flex; align-items: center; gap: 8px;
-  border-bottom: 1px solid var(--border); flex-shrink: 0;
-}
+/* ── BOARD VIEW ──────────────────────────────────────────── */
+.board { display: flex; gap: 14px; padding: 20px; min-height: 100%; align-items: flex-start; min-width: max-content; }
+.column { width: 272px; flex-shrink: 0; background: var(--paper-2); border-radius: var(--r-lg); border: 1px solid var(--border); display: flex; flex-direction: column; min-height: 200px; }
+.col-header { padding: 12px 14px 10px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .col-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.col-label {
-  font-family: var(--ff-mono); font-size: 10px;
-  letter-spacing: .1em; text-transform: uppercase;
-  color: var(--ink-2); font-weight: 500; flex: 1;
-}
-.col-count {
-  font-family: var(--ff-mono); font-size: 11px;
-  color: var(--ink-3); background: var(--paper-3);
-  padding: 1px 7px; border-radius: 20px;
-}
-/* Drop zone for drag-and-drop */
-.col-body {
-  padding: 10px; display: flex; flex-direction: column;
-  gap: 8px; flex: 1; min-height: 60px;
-}
+.col-label { font-family: var(--ff-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-2); font-weight: 500; flex: 1; }
+.col-count { font-family: var(--ff-mono); font-size: 11px; color: var(--ink-3); background: var(--paper-3); padding: 1px 7px; border-radius: 20px; }
+.col-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 60px; }
 .col-body.drag-over { background: rgba(47,79,79,.06); border-radius: var(--r); }
 
-/* ── CLIENT CARD ─────────────────────────────────────────────
-   The core visual unit. Left border color = health status.
-   Sections: top (name/contact/tags), money row, payment, action.
-   ─────────────────────────────────────────────────────────── */
-.card {
-  background: var(--white); border-radius: var(--r-lg);
-  border: 1px solid var(--border); box-shadow: var(--shadow-sm);
-  cursor: grab; position: relative; overflow: hidden;
-  transition: box-shadow .15s, transform .15s;
-  border-left: 3px solid var(--border); /* overridden by health classes below */
-}
+/* ── CLIENT CARD ─────────────────────────────────────────── */
+.card { background: var(--white); border-radius: var(--r-lg); border: 1px solid var(--border); box-shadow: var(--shadow-sm); cursor: grab; position: relative; overflow: hidden; transition: box-shadow .15s, transform .15s; border-left: 3px solid var(--border); }
 .card:hover { box-shadow: var(--shadow); transform: translateY(-1px); }
 .card.dragging { opacity: .5; cursor: grabbing; transform: scale(.98); }
-
-/* Health status — colored left border */
 .card.health-green { border-left-color: var(--green); }
 .card.health-amber { border-left-color: var(--amber); }
 .card.health-red   { border-left-color: var(--red); }
-
 .card-top { padding: 12px 12px 0; position: relative; }
-/* Pulsing indicator dots — top right of card */
 .card-badges { position: absolute; top: 10px; right: 10px; display: flex; gap: 4px; align-items: center; }
-.pulse-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  animation: pulse-anim 2s infinite;
-}
-.pulse-dot.red   { background: var(--red); }    /* overdue payment */
-.pulse-dot.amber { background: var(--amber); }  /* renewing soon */
+.pulse-dot { width: 8px; height: 8px; border-radius: 50%; animation: pulse-anim 2s infinite; }
+.pulse-dot.red   { background: var(--red); }
+.pulse-dot.amber { background: var(--amber); }
 @keyframes pulse-anim {
   0%, 100% { opacity: 1; transform: scale(1); }
-  50%       { opacity: .6; transform: scale(.85); }
+  50%      { opacity: .6; transform: scale(.85); }
 }
-.card-name {
-  font-family: var(--ff-display); font-size: 15px;
-  font-weight: 400; color: var(--ink);
-  line-height: 1.2; margin-bottom: 3px;
-}
+.card-name { font-family: var(--ff-display); font-size: 15px; font-weight: 400; color: var(--ink); line-height: 1.2; margin-bottom: 3px; }
 .card-contact { font-size: 11px; color: var(--ink-3); margin-bottom: 8px; }
 .card-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
-.tag {
-  font-family: var(--ff-mono); font-size: 9px;
-  letter-spacing: .04em; text-transform: uppercase;
-  padding: 2px 7px; border-radius: 4px;
-  background: var(--paper-2); color: var(--ink-3); border: 1px solid var(--border);
-}
-/* Money row: value on left, days-in-stage on right */
-.card-money {
-  display: flex; align-items: baseline; justify-content: space-between;
-  padding: 8px 12px; border-top: 1px solid var(--paper-2);
-}
+.tag { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .04em; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: var(--paper-2); color: var(--ink-3); border: 1px solid var(--border); }
+.card-money { display: flex; align-items: baseline; justify-content: space-between; padding: 8px 12px; border-top: 1px solid var(--paper-2); }
 .card-value { font-family: var(--ff-display); font-size: 17px; font-weight: 400; color: var(--ink); }
-.card-days  { font-family: var(--ff-mono); font-size: 10px; color: var(--ink-3); }
-.card-days.warn   { color: var(--amber); } /* 14+ days in stage */
-.card-days.danger { color: var(--red); }   /* 21+ days in stage */
-/* Payment due block — turns red when overdue */
-.card-payment {
-  margin: 0 10px 10px; padding: 7px 10px;
-  border-radius: var(--r); border: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-}
+.card-days { font-family: var(--ff-mono); font-size: 10px; color: var(--ink-3); }
+.card-days.warn   { color: var(--amber); }
+.card-days.danger { color: var(--red); }
+.card-payment { margin: 0 10px 10px; padding: 7px 10px; border-radius: var(--r); border: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
 .card-payment.overdue { background: var(--red-2); border-color: var(--red-3); }
 .pay-label { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
 .pay-label.overdue { color: var(--red); }
-.pay-val   { font-family: var(--ff-mono); font-size: 12px; font-weight: 500; color: var(--ink); }
-.pay-val.overdue   { color: var(--red); }
-/* Next action row at bottom of card */
-.card-action {
-  padding: 8px 12px 10px; display: flex;
-  align-items: flex-start; gap: 6px;
-  border-top: 1px solid var(--paper-2);
-}
+.pay-val { font-family: var(--ff-mono); font-size: 12px; font-weight: 500; color: var(--ink); }
+.pay-val.overdue { color: var(--red); }
+.card-action { padding: 8px 12px 10px; display: flex; align-items: flex-start; gap: 6px; border-top: 1px solid var(--paper-2); }
 .action-icon { color: var(--teal); flex-shrink: 0; margin-top: 1px; }
 .action-icon svg { width: 12px; height: 12px; }
 .action-text { font-size: 11px; color: var(--ink-2); flex: 1; line-height: 1.4; }
-/* Owner initials circle */
-.owner-avatar {
-  width: 22px; height: 22px; border-radius: 50%;
-  background: var(--teal-3); color: var(--teal);
-  display: flex; align-items: center; justify-content: center;
-  font-family: var(--ff-mono); font-size: 8px; font-weight: 500;
-  flex-shrink: 0; margin-top: 1px;
-}
+.owner-avatar { width: 22px; height: 22px; border-radius: 50%; background: var(--teal-3); color: var(--teal); display: flex; align-items: center; justify-content: center; font-family: var(--ff-mono); font-size: 8px; font-weight: 500; flex-shrink: 0; margin-top: 1px; }
 
-/* Source badge — shown on cards created via webhook (Tally, Typeform, etc.) */
-.source-badge {
-  display: inline-flex; align-items: center; gap: 3px;
-  padding: 2px 6px; border-radius: 4px;
-  font-family: var(--ff-mono); font-size: 9px; font-weight: 500;
-  letter-spacing: .04em; text-transform: uppercase;
-  background: #e8f0f7; color: #3a6b9f;
-  border: 1px solid #c5d9ed;
-  flex-shrink: 0;
-}
-.source-badge.tally   { background: #f0eaff; color: #6b3fa0; border-color: #d9c5f5; }
+/* Source badge — webhook-sourced clients. v12 adds amber `pending`
+   variant for tray cards. Existing tally/typeform unchanged. */
+.source-badge { display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; border-radius: 4px; font-family: var(--ff-mono); font-size: 9px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; background: #e8f0f7; color: #3a6b9f; border: 1px solid #c5d9ed; flex-shrink: 0; }
+.source-badge.tally    { background: #f0eaff; color: #6b3fa0; border-color: #d9c5f5; }
 .source-badge.typeform { background: #e8f7f0; color: #276749; border-color: #b8e2cc; }
+/* v12: pending tokens per Section 4.2 — amber distinguishes unaccepted
+   leads in the tray from accepted-tally clients on the board. */
+.source-badge.pending  { background: #fff3e0; color: #b45309; border-color: #f7d9a8; }
 
-/* ── TABLE VIEW ──────────────────────────────────────────────
-   Standard data table. Sorted by overdue first, then value.
-   Clicking a row opens the edit modal.
-   ─────────────────────────────────────────────────────────── */
+/* ── TABLE VIEW ──────────────────────────────────────────── */
 .table-wrap { padding: 20px; min-width: 0; }
-.data-table {
-  width: 100%; border-collapse: collapse;
-  background: var(--white); border-radius: var(--r-lg);
-  overflow: hidden; border: 1px solid var(--border);
-  box-shadow: var(--shadow-sm);
-}
-.data-table th {
-  font-family: var(--ff-mono); font-size: 9px;
-  letter-spacing: .1em; text-transform: uppercase;
-  color: var(--ink-3); padding: 10px 14px;
-  text-align: left; border-bottom: 1px solid var(--border);
-  background: var(--paper); white-space: nowrap;
-}
+.data-table { width: 100%; border-collapse: collapse; background: var(--white); border-radius: var(--r-lg); overflow: hidden; border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
+.data-table th { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); background: var(--paper); white-space: nowrap; }
 .data-table td { padding: 12px 14px; border-bottom: 1px solid var(--paper-2); vertical-align: middle; }
 .data-table tr:last-child td { border-bottom: none; }
 .data-table tr:hover td { background: var(--paper); }
-/* Red left border on rows with overdue payment */
 .data-table tr.overdue-row td:first-child { border-left: 3px solid var(--red); }
-.td-name    { font-family: var(--ff-display); font-size: 15px; font-weight: 400; color: var(--ink); }
+.td-name { font-family: var(--ff-display); font-size: 15px; font-weight: 400; color: var(--ink); }
 .td-contact { font-size: 11px; color: var(--ink-3); margin-top: 1px; }
-.td-mono    { font-family: var(--ff-mono); font-size: 12px; color: var(--ink-2); }
+.td-mono { font-family: var(--ff-mono); font-size: 12px; color: var(--ink-2); }
 .td-mono.overdue { color: var(--red); font-weight: 500; }
-.td-action  { font-size: 12px; color: var(--ink-2); max-width: 180px; }
-.td-value   { font-family: var(--ff-display); font-size: 15px; color: var(--ink); }
-/* Stage pill — color-coded by stage */
+.td-action { font-size: 12px; color: var(--ink-2); max-width: 180px; }
+.td-value { font-family: var(--ff-display); font-size: 15px; color: var(--ink); }
 .stage-pill { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 4px; }
 .sp-onboarding { background: var(--teal-3);  color: var(--teal);  }
 .sp-active     { background: var(--green-2); color: var(--green); }
 .sp-review     { background: var(--amber-2); color: var(--amber); }
 .sp-risk       { background: var(--red-2);   color: var(--red);   }
 .sp-churned    { background: var(--paper-2); color: var(--ink-3); }
-/* Health pill — shown in table, not on cards */
 .health-pill { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; padding: 3px 9px; border-radius: 20px; }
 .hp-green { background: var(--green-2); color: var(--green); }
 .hp-amber { background: var(--amber-2); color: var(--amber); }
 .hp-red   { background: var(--red-2);   color: var(--red);   }
-/* Owner avatar in table */
 .td-owner { width: 28px; height: 28px; border-radius: 50%; background: var(--teal-3); display: flex; align-items: center; justify-content: center; font-family: var(--ff-mono); font-size: 9px; font-weight: 500; color: var(--teal); }
 
-/* ── MODAL ───────────────────────────────────────────────────
-   Overlay + centered panel. Opens for both new and edit.
-   Two-column form grid. Sticky header/footer.
-   ─────────────────────────────────────────────────────────── */
-.modal-overlay {
-  position: fixed; inset: 0; background: rgba(27,27,27,.5);
-  z-index: 1000; display: flex; align-items: center;
-  justify-content: center; padding: 20px;
-  opacity: 0; pointer-events: none; transition: opacity .2s;
-}
+/* ── MODAL ───────────────────────────────────────────────── */
+.modal-overlay { position: fixed; inset: 0; background: rgba(27,27,27,.5); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 20px; opacity: 0; pointer-events: none; transition: opacity .2s; }
 .modal-overlay.open { opacity: 1; pointer-events: all; }
-.modal {
-  background: var(--paper); border-radius: var(--r-xl);
-  width: 100%; max-width: 660px; max-height: 92vh;
-  overflow-y: auto; box-shadow: var(--shadow-lg);
-  transform: scale(.97) translateY(8px); transition: transform .2s;
-  border: 1px solid var(--border);
-}
+.modal { background: var(--paper); border-radius: var(--r-xl); width: 100%; max-width: 660px; max-height: 92vh; overflow-y: auto; box-shadow: var(--shadow-lg); transform: scale(.97) translateY(8px); transition: transform .2s; border: 1px solid var(--border); }
 .modal-overlay.open .modal { transform: scale(1) translateY(0); }
-.modal-header {
-  padding: 22px 26px 16px;
-  display: flex; align-items: center; justify-content: space-between;
-  position: sticky; top: 0; background: var(--paper); z-index: 1;
-  border-bottom: 1px solid var(--border);
-}
+.modal-header { padding: 22px 26px 16px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; background: var(--paper); z-index: 1; border-bottom: 1px solid var(--border); }
 .modal-title { font-family: var(--ff-display); font-size: 22px; font-weight: 400; }
-.modal-close {
-  width: 32px; height: 32px; border-radius: var(--r);
-  border: 1px solid var(--border); background: transparent;
-  cursor: pointer; display: flex; align-items: center; justify-content: center;
-  color: var(--ink-3); transition: all .12s;
-}
+.modal-close { width: 32px; height: 32px; border-radius: var(--r); border: 1px solid var(--border); background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--ink-3); transition: all .12s; }
 .modal-close:hover { background: var(--paper-2); color: var(--ink); }
 .modal-close svg { width: 15px; height: 15px; }
 .modal-body { padding: 22px 26px; }
-/* Two-column grid for form fields */
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.modal-footer {
-  padding: 16px 26px; border-top: 1px solid var(--border);
-  display: flex; gap: 8px; align-items: center;
-  position: sticky; bottom: 0; background: var(--paper);
-}
+.modal-footer { padding: 16px 26px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; position: sticky; bottom: 0; background: var(--paper); }
 .modal-footer .spacer { flex: 1; }
 
-/* ── TOAST NOTIFICATION ──────────────────────────────────────
-   Appears at the bottom center. Fades in/out.
-   Optionally shows an "Undo" button for deletes.
-   ─────────────────────────────────────────────────────────── */
-.toast {
-  position: fixed; bottom: 52px; left: 50%;
-  transform: translateX(-50%) translateY(12px);
-  background: var(--ink); color: var(--paper);
-  padding: 10px 18px; border-radius: var(--r); font-size: 13px;
-  z-index: 9999; opacity: 0; transition: all .25s;
-  pointer-events: none; display: flex; align-items: center;
-  gap: 10px; white-space: nowrap;
-}
+/* ── TOAST ───────────────────────────────────────────────── */
+.toast { position: fixed; bottom: 52px; left: 50%; transform: translateX(-50%) translateY(12px); background: var(--ink); color: var(--paper); padding: 10px 18px; border-radius: var(--r); font-size: 13px; z-index: 9999; opacity: 0; transition: all .25s; pointer-events: none; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-.toast-undo {
-  font-family: var(--ff-mono); font-size: 11px; letter-spacing: .04em;
-  color: var(--paper); text-decoration: underline;
-  cursor: pointer; background: none; border: none;
-  padding: 0; pointer-events: all;
-}
+.toast-undo { font-family: var(--ff-mono); font-size: 11px; letter-spacing: .04em; color: var(--paper); text-decoration: underline; cursor: pointer; background: none; border: none; padding: 0; pointer-events: all; }
 
-/* ── FOOTER ──────────────────────────────────────────────────
-   Fixed 36px bar at the bottom. Brand note + keyboard hints.
-   ─────────────────────────────────────────────────────────── */
-.footer {
-  position: fixed; bottom: 0; left: 0; right: 0; height: 36px;
-  background: var(--white); border-top: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 20px;
-}
+/* ── FOOTER ──────────────────────────────────────────────── */
+.footer { position: fixed; bottom: 0; left: 0; right: 0; height: 36px; background: var(--white); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; }
 .footer-brand { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-4); }
-.footer-keys  { display: flex; gap: 16px; }
-.fk           { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .05em; color: var(--ink-4); }
-.kbd          { display: inline-block; background: var(--paper-2); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 9px; color: var(--ink-3); line-height: 16px; }
+.footer-keys { display: flex; gap: 16px; }
+.fk { font-family: var(--ff-mono); font-size: 9px; letter-spacing: .05em; color: var(--ink-4); }
+.kbd { display: inline-block; background: var(--paper-2); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 9px; color: var(--ink-3); line-height: 16px; }
 
-/* ── RESPONSIVE — MOBILE ─────────────────────────────────────
-   Simplified layout for narrow screens.
-   ─────────────────────────────────────────────────────────── */
+/* ── RESPONSIVE — MOBILE ─────────────────────────────────── */
 @media (max-width: 700px) {
-  .topbar-stats .ts-label { display: none; }  /* hide stat labels, keep numbers */
-  .filter-chips            { display: none; }  /* chips take too much space */
-  .footer-keys             { display: none; }  /* keyboard hints irrelevant on mobile */
-  .brand-sep, .brand-sub   { display: none; }  /* simplify brand */
-  .user-email              { display: none; }  /* email hidden, avatar remains */
-  .form-grid               { grid-template-columns: 1fr; } /* single column form */
+  .topbar-stats .ts-label { display: none; }
+  .filter-chips            { display: none; }
+  .footer-keys             { display: none; }
+  .brand-sep, .brand-sub   { display: none; }
+  .user-email              { display: none; }
+  .form-grid               { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -681,8 +383,6 @@ body {
 
 <!-- ============================================================
      SECTION 3: HTML MARKUP
-     Structure only — no inline styles except display:none for
-     elements hidden on load. All visual design is in CSS above.
      ============================================================ -->
 
 <!-- AUTH SCREEN — visible on load, hidden after sign-in -->
@@ -691,10 +391,8 @@ body {
     <div class="auth-logo">ClaudeCodingGuy</div>
     <div class="auth-sub">Delivery CRM</div>
 
-    <!-- Error banner — shown by showAuthError() in JS -->
     <div class="auth-error" id="authError"></div>
 
-    <!-- SIGN IN PANEL -->
     <div id="signInPanel">
       <div class="auth-title">Welcome back</div>
       <div class="auth-form">
@@ -713,7 +411,6 @@ body {
       </div>
     </div>
 
-    <!-- SIGN UP PANEL — swapped in by showPanel('signUp') -->
     <div id="signUpPanel" style="display:none">
       <div class="auth-title">Create your account</div>
       <div class="auth-form">
@@ -732,14 +429,12 @@ body {
       </div>
     </div>
 
-    <!-- CONFIRM EMAIL PANEL — shown after successful signup -->
     <div id="confirmPanel" style="display:none">
       <div class="auth-title">Check your email</div>
       <p style="font-size:13px;color:var(--ink-3);line-height:1.6;margin-bottom:20px">
         We sent a confirmation link to <span id="confirmEmail" style="color:var(--ink);font-weight:500"></span>.
         Click it to activate your account — this tab will update automatically when you do.
       </p>
-      <!-- Subtle waiting indicator so user knows the tab is listening -->
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:20px">
         <div class="sync-dot syncing"></div>
         <span style="font-family:var(--ff-mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)">Waiting for confirmation…</span>
@@ -749,11 +444,8 @@ body {
       </button>
     </div>
 
-    <!-- WELCOME PANEL — shown briefly after auto-login on confirmation -->
-    <!-- Positioned absolutely to cover the entire auth-box, including the sign-up form beneath -->
     <div id="welcomePanel" style="display:none;position:absolute;inset:0;background:var(--paper);border-radius:var(--r-xl);overflow:hidden;z-index:10">
       <canvas id="inkCanvas" style="position:absolute;inset:0;width:100%;height:100%"></canvas>
-      <!-- Text floats above the canvas animation -->
       <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px;text-align:center">
         <div style="font-family:var(--ff-display);font-size:36px;font-weight:300;color:#F5F1EA;margin-bottom:10px;opacity:0;transform:translateY(10px);transition:all .7s ease .5s" id="welcomeHeading">
           You're in.
@@ -767,7 +459,7 @@ body {
   </div>
 </div>
 
-<!-- TOPBAR — hidden until signed in -->
+<!-- TOPBAR -->
 <header class="topbar" id="topbar" style="display:none">
   <div class="brand">
     <span class="brand-name">ClaudeCodingGuy</span>
@@ -775,7 +467,6 @@ body {
     <span class="brand-sub">Delivery</span>
   </div>
 
-  <!-- Live stats — numbers updated by updateStats() in JS -->
   <div class="topbar-stats">
     <div class="ts" id="stat-active">
       <span class="ts-num" id="stat-active-num">0</span>
@@ -795,22 +486,27 @@ body {
     </div>
   </div>
 
-  <!-- User section — email, sync status, sign out -->
   <div class="user-menu">
     <div class="sync-indicator">
       <div class="sync-dot" id="syncDot"></div>
       <span id="syncLabel">Synced</span>
     </div>
+    <!-- v12: notification badge — shown only when pending count > 0 -->
+    <button class="notify-badge" id="notifyBadge" onclick="toggleNotificationTray()" title="Pending leads">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+      </svg>
+      <span id="notifyBadgeCount">0</span>
+    </button>
     <div class="user-avatar" id="userAvatar">?</div>
     <span class="user-email" id="userEmail"></span>
     <button class="signout-btn" onclick="signOut()">Sign out</button>
   </div>
 </header>
 
-<!-- TOOLBAR — hidden until signed in -->
+<!-- TOOLBAR -->
 <div class="toolbar" id="toolbar" style="display:none">
-
-  <!-- Board / Table view toggle -->
   <div class="view-toggle">
     <button class="vt-btn active" id="btn-board" onclick="setView('board')">
       <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -831,7 +527,6 @@ body {
     </button>
   </div>
 
-  <!-- Search box — filters board/table in real time via oninput -->
   <div class="search-wrap">
     <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
       <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -839,7 +534,6 @@ body {
     <input class="search-input" id="searchInput" placeholder="Search clients…" oninput="render()">
   </div>
 
-  <!-- Filter chips — each toggles a filter via toggleFilter() -->
   <div class="filter-chips">
     <button class="chip chip-red"   id="chip-overdue"  onclick="toggleFilter('overdue')">
       Overdue <span class="chip-count" id="chip-overdue-count">0</span>
@@ -852,7 +546,6 @@ body {
     </button>
   </div>
 
-  <!-- Action buttons -->
   <div class="toolbar-right">
     <button class="btn btn-ghost" onclick="exportCSV()">
       <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -876,10 +569,9 @@ body {
   </div>
 </div>
 
-<!-- MAIN — scrollable content area, hidden until signed in -->
 <main class="main" id="main" style="display:none"></main>
 
-<!-- CLIENT MODAL — for both new clients and editing existing ones -->
+<!-- CLIENT MODAL -->
 <div class="modal-overlay" id="modalOverlay" onclick="handleOverlayClick(event)">
   <div class="modal" id="modal">
     <div class="modal-header">
@@ -891,7 +583,6 @@ body {
       </button>
     </div>
     <div class="modal-body">
-      <!-- Two-column grid — fields marked .full span both columns -->
       <div class="form-grid">
         <div class="form-group">
           <label class="form-label">Client Name</label>
@@ -954,7 +645,6 @@ body {
       </div>
     </div>
     <div class="modal-footer">
-      <!-- Delete only shown when editing an existing client -->
       <button class="btn btn-danger btn-sm" id="deleteBtn" onclick="deleteClient()" style="display:none">
         <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <polyline points="3 6 5 6 21 6"/>
@@ -970,13 +660,36 @@ body {
   </div>
 </div>
 
-<!-- TOAST — temporary notification at bottom of screen -->
+<!-- v12: NOTIFICATION TRAY — slides in from right edge.
+     Body-level so z-index works regardless of trigger location.
+     Backdrop overlay catches outside-clicks to dismiss. -->
+<div class="tray-overlay" id="trayOverlay" onclick="closeNotificationTray()"></div>
+<aside class="notify-tray" id="notifyTray" aria-hidden="true">
+  <div class="tray-header">
+    <div class="tray-title">
+      Pending leads
+      <span class="tray-count" id="trayCount">0</span>
+    </div>
+    <button class="tray-close" onclick="closeNotificationTray()" aria-label="Close tray">
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
+  <div class="tray-bulk" id="trayBulk">
+    <button class="btn btn-primary btn-sm" onclick="acceptAllPending()">Accept All</button>
+    <button class="btn btn-ghost btn-sm"   onclick="dismissAllPending()">Dismiss All</button>
+  </div>
+  <div class="tray-body" id="trayBody"></div>
+</aside>
+
+<!-- TOAST -->
 <div class="toast" id="toast">
   <span id="toastMsg"></span>
   <button class="toast-undo" id="toastUndo" style="display:none" onclick="undoDelete()">Undo</button>
 </div>
 
-<!-- FOOTER — brand note + keyboard shortcut hints -->
+<!-- FOOTER -->
 <footer class="footer" id="footer" style="display:none">
   <span class="footer-brand">Built with Claude. Your data syncs via Supabase.</span>
   <div class="footer-keys">
@@ -990,111 +703,61 @@ body {
 <script>
 /* ============================================================
    SECTION 1: CONFIGURATION
-   ─────────────────────────────────────────────────────────────
-   This is the ONLY section you need to touch to:
-   • Switch between Supabase and localStorage
-   • Point to a different Supabase project
-   • Add a new backend provider in the future
-
-   BACKEND OPTIONS:
-   • 'supabase'    → real database, syncs across devices
-   • 'localStorage' → browser only, no account needed, no sync
    ============================================================ */
 
 const BACKEND = 'supabase'; // ← change this to switch backends
 
-// ── TEST MODE ─────────────────────────────────────────────────
-// When true, bypasses the email confirmation flow entirely and
-// attempts an immediate sign-in after signup. Useful when:
-//   • Supabase email confirmation is toggled OFF in the dashboard
-//   • Custom SMTP is disabled or not yet configured
-//   • You're testing the signup/welcome animation flow locally
-//
-// TO USE: set to true, disable confirmation in Supabase dashboard
-// TO REVERT: set back to false, re-enable confirmation + SMTP
-//
-// ⚠️  NEVER deploy to production with TEST_MODE = true
-const TEST_MODE = false; // ← set to true only for testing (see comments above)
+// ── TEST MODE ────────────────────────────────────────────────
+// When true, bypasses email confirmation. NEVER deploy with true.
+const TEST_MODE = false;
 
-// Your Supabase project credentials.
-// The ANON KEY is safe to include here — it's a public key
-// protected by Row Level Security (RLS) in the database.
-// NEVER put the service_role key here.
 const SUPABASE_URL      = 'https://pjhdjomxxsidfyqpqzoy.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBqaGRqb214eHNpZGZ5cXBxem95Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgyMTA1MDAsImV4cCI6MjA5Mzc4NjUwMH0.KwIPri2D8Usn20iS7wANwtbV-pgMh0kHpmYJe0U6Dds';
 
 
 /* ============================================================
-   SECTION 4: DATA LAYER
-   ─────────────────────────────────────────────────────────────
-   All database reads and writes go through this single DB
-   object. The rest of the app NEVER calls Supabase directly.
-
-   WHY THIS MATTERS:
-   To swap backends (e.g. switch to Firebase), you only change
-   the internals of these three functions. The board, cards,
-   modal, etc. stay identical. This is called the
-   "Repository Pattern" in software architecture.
-
-   ADDING A NEW FIELD:
-   When you add a field (e.g. "priority"), update:
-   1. toSupabase()  — include the new field when saving
-   2. fromSupabase() — include it when reading back
-   3. The SQL migration (add column to the table)
-   4. The modal HTML (add the input field)
-   5. openModal() — populate it when editing
-   6. saveClient() — read it from the form
+   SECTION 4: DATA LAYER — Repository pattern.
+   All DB reads/writes flow through this single object. Swap
+   BACKEND above to switch storage providers; nothing else
+   in the app needs to change.
    ============================================================ */
 const DB = {
 
-  // Fetch all clients for the current user.
-  // RLS in the database ensures only the logged-in user's
-  // records are returned — no filtering needed in code.
   async getClients() {
     if (BACKEND === 'supabase') {
       const rows = await sbFetch('GET', '/rest/v1/clients?select=*&order=created_at.desc');
-      return rows.map(fromSupabase); // convert DB format → app format
+      return rows.map(fromSupabase);
     } else {
-      // localStorage fallback — parse from browser storage
       return JSON.parse(localStorage.getItem('cwc-clients') || '[]');
     }
   },
 
-  // Save a client — handles both insert (new) and update (edit).
-  // The _isNew flag on the data object tells us which to do.
   async saveClient(data) {
     if (BACKEND === 'supabase') {
       const user = currentUser;
       if (!user) throw new Error('Not authenticated');
 
-      const row = toSupabase(data, user.id); // convert app format → DB format
+      const row = toSupabase(data, user.id);
 
       if (data._isNew) {
-        // INSERT — remove the id so Supabase generates one
         delete row.id;
         const result = await sbFetch('POST', '/rest/v1/clients', row);
-        // Return the created record (with Supabase-generated id)
         return fromSupabase(Array.isArray(result) ? result[0] : result);
       } else {
-        // UPDATE — request the updated record back from Supabase so the
-        // local clients array reflects exactly what the database stored.
-        // Prefer: return=representation tells Supabase to return the row.
+        // PATCH with return=representation per CLAUDE.md non-negotiable.
         const result = await sbFetch('PATCH',
           `/rest/v1/clients?id=eq.${data.id}`,
           row,
-          true // returnRepresentation = true
+          true
         );
-        // result is an array from Supabase — take the first element.
-        // If Supabase returns nothing, re-fetch the specific row to get current state.
         if (result && Array.isArray(result) && result.length > 0) {
           return fromSupabase(result[0]);
         }
-        // Fallback: fetch the row directly to guarantee we have fresh data
+        // Fallback GET when PATCH returns empty — guarantees fresh state.
         const fetched = await sbFetch('GET', `/rest/v1/clients?id=eq.${data.id}&select=*`);
         return fetched && fetched[0] ? fromSupabase(fetched[0]) : fromSupabase(row);
       }
     } else {
-      // localStorage fallback
       let clients = await this.getClients();
       if (data._isNew) {
         clients.unshift(data);
@@ -1107,7 +770,6 @@ const DB = {
     }
   },
 
-  // Delete a single client by id.
   async deleteClient(id) {
     if (BACKEND === 'supabase') {
       await sbFetch('DELETE', `/rest/v1/clients?id=eq.${id}`);
@@ -1122,51 +784,18 @@ const DB = {
 
 /* ============================================================
    SECTION 5: SUPABASE HELPERS
-   ─────────────────────────────────────────────────────────────
-   Low-level functions that talk to the Supabase REST API.
-   You shouldn't need to modify these unless Supabase changes
-   their API structure (very rare).
-
-   toSupabase()   — converts our app's client object into the
-                    shape the database column names expect
-   fromSupabase() — converts a database row back into the shape
-                    the rest of the app uses
-   sbFetch()      — makes authenticated HTTP requests to Supabase
    ============================================================ */
 
-// Convert app client object → database row format
-// Add new fields here when you add columns to the SQL table
 /* ============================================================
    SECTION 5A: ANALYTICS TRACKING
-   ─────────────────────────────────────────────────────────────
-   A single track() function is the only way the app writes
-   to the events and client_stage_history tables. All other
-   code calls this function — nothing writes directly.
+   Fire-and-forget — tracking never blocks the UI or shows
+   errors to the user. Append-only events table.
 
-   DESIGN DECISIONS:
-   - Fire-and-forget: tracking never blocks the UI or throws
-     visible errors. A failed track call is logged to console
-     only. The user experience is never interrupted.
-   - Append-only: events are never updated or deleted. They
-     are immutable facts about what happened.
-   - Opt-out ready: if BACKEND !== 'supabase', tracking is
-     skipped entirely (no localStorage tracking needed).
-   - stage_changed events also update client_stage_history:
-     closes the previous open row, opens a new one.
-
-   TO ADD A NEW EVENT:
-   1. Call track('your_event_name', clientId, { ...properties })
-      anywhere in the app
-   2. No schema changes needed — properties is flexible jsonb
-   3. Document the new event in migration-v2-events.sql comments
+   v12 EVENTS ADDED:
+   - lead_accepted   — { pending_lead_id, client_id }
+   - lead_dismissed  — { pending_lead_id }
    ============================================================ */
-
-// Track a user action — fire and forget, never interrupts UI
-// event     — snake_case string e.g. 'stage_changed'
-// clientId  — uuid of related client, or null for session events
-// properties — plain object with event-specific data
 async function track(event, clientId = null, properties = {}) {
-  // Only track when using Supabase and user is authenticated
   if (BACKEND !== 'supabase' || !currentUser) return;
 
   try {
@@ -1177,40 +806,31 @@ async function track(event, clientId = null, properties = {}) {
       properties,
     });
   } catch (e) {
-    // Tracking failures are always silent — never surface to user
     console.warn('[track] Failed to record event:', event, e.message);
   }
 }
 
-// Record a stage change — updates both the events log and the
-// client_stage_history table (closes old row, opens new one).
-// Called from the drag-and-drop handler.
 async function trackStageChange(client, fromStage, toStage, daysInPreviousStage) {
   if (BACKEND !== 'supabase' || !currentUser) return;
 
   try {
-    // 1. Log the stage_changed event
     await track('stage_changed', client.id, {
       from:                 fromStage,
       to:                   toStage,
       days_in_previous_stage: daysInPreviousStage,
     });
 
-    // 2. Close the previous open stage history row
-    //    Find the row where this client's exited_at is NULL (current stage)
-    //    and set exited_at + duration_seconds
     const now = new Date().toISOString();
+    // PATCH with return=representation per CLAUDE.md.
     await sbFetch('PATCH',
       `/rest/v1/client_stage_history?client_id=eq.${client.id}&exited_at=is.null`,
       {
         exited_at:        now,
-        // duration_seconds will be recalculated server-side ideally,
-        // but we approximate here from the days count
         duration_seconds: daysInPreviousStage * 86400,
-      }
+      },
+      true
     );
 
-    // 3. Open a new stage history row for the new stage
     await sbFetch('POST', '/rest/v1/client_stage_history', {
       user_id:   currentUser.id,
       client_id: client.id,
@@ -1223,7 +843,6 @@ async function trackStageChange(client, fromStage, toStage, daysInPreviousStage)
   }
 }
 
-// Create the initial stage history row when a client is first created
 async function trackClientCreated(client) {
   if (BACKEND !== 'supabase' || !currentUser) return;
   try {
@@ -1241,7 +860,7 @@ async function trackClientCreated(client) {
 function toSupabase(c, userId) {
   return {
     id:       c.id,
-    user_id:  userId,          // links this record to the logged-in user
+    user_id:  userId,
     name:     c.name,
     contact:  c.contact  || null,
     owner:    c.owner    || null,
@@ -1251,17 +870,13 @@ function toSupabase(c, userId) {
     started:  c.started  || null,
     payment:  c.payment  || null,
     renews:   c.renews   || null,
-    tags:     c.tags     || [],  // stored as a PostgreSQL text[] array
+    tags:     c.tags     || [],
     action:   c.action   || null,
     notes:    c.notes    || null,
-    source:   c.source   || null, // null = manual, 'tally' = via webhook
-    // NOTE: created_at and updated_at are set automatically by the database
-    // TO ADD A FIELD: add it here, matching the SQL column name exactly
+    source:   c.source   || null,
   };
 }
 
-// Convert database row → app client object format
-// Add new fields here when you add columns to the SQL table
 function fromSupabase(row) {
   return {
     id:      row.id,
@@ -1277,22 +892,15 @@ function fromSupabase(row) {
     tags:    row.tags    || [],
     action:  row.action  || '',
     notes:   row.notes   || '',
-    source:  row.source  || null, // null = manual, 'tally' = via Tally webhook
-    // TO ADD A FIELD: add it here, matching the JS property name you want
+    source:  row.source  || null,
   };
 }
 
-// Make an authenticated HTTP request to the Supabase REST API.
-// method             — 'GET', 'POST', 'PATCH', 'DELETE'
-// path               — the API path, e.g. '/rest/v1/clients?select=*'
-// body               — JavaScript object to send as JSON (optional)
-// returnRepresentation — if true, ask Supabase to return the modified row(s)
 async function sbFetch(method, path, body, returnRepresentation = false) {
   const headers = {
     'Content-Type':  'application/json',
     'apikey':        SUPABASE_ANON_KEY,
     'Authorization': `Bearer ${currentSession?.access_token || SUPABASE_ANON_KEY}`,
-    // 'return=representation' makes POST and PATCH return the created/updated row
     'Prefer': (method === 'POST' || returnRepresentation)
       ? 'return=representation'
       : 'return=minimal',
@@ -1305,7 +913,6 @@ async function sbFetch(method, path, body, returnRepresentation = false) {
   });
 
   if (!response.ok) {
-    // Parse Supabase's error format and surface the message
     const err = await response.json().catch(() => ({}));
     throw new Error(err.message || `HTTP ${response.status}`);
   }
@@ -1316,65 +923,341 @@ async function sbFetch(method, path, body, returnRepresentation = false) {
 
 
 /* ============================================================
-   SECTION 6: AUTH
+   SECTION 5B: NOTIFICATION QUEUE — PENDING LEADS (v12)
    ─────────────────────────────────────────────────────────────
-   Handles sign in, sign up, sign out, and session persistence.
+   Pending leads from Tally land in pending_leads. The user
+   reviews them in the tray and either accepts (creates a client)
+   or dismisses (audit-only soft delete).
 
-   HOW SESSION PERSISTENCE WORKS:
-   After a successful login, Supabase returns a "session" object
-   containing an access_token (a JWT — a secure string that
-   proves who you are). We store this in localStorage so the
-   user stays logged in when they refresh or close the tab.
-   On app start, init() checks for a saved session and skips
-   the login screen if one exists.
+   POLLING vs REALTIME (Spec Section 10.3):
+   Phase 1 uses a 30-second setInterval. Simple, reliable, and
+   30s is well within the user's expected response window.
 
-   The access_token expires after 1 hour. We silently refresh it
-   every 50 minutes using the refresh_token. Activity tracking
-   (clicks and keypresses) resets the timer so active users are
-   never interrupted. On refresh failure, the user sees a gentle
-   message and is returned to the login screen.
+   ─── PHASE 2 UPGRADE PATH — Supabase Realtime ─────────────
+   When ready, replace the PENDING_POLL_MS setInterval with a
+   Supabase Realtime channel subscribed to INSERT events on the
+   pending_leads table, filtered by user_id. Instant delivery;
+   no constant background fetch.
 
-   startSessionRefresh() must be called after every successful login
-   and when restoring a saved session on page load.
+   Sketch (requires Realtime client lib — do not enable yet):
+     const channel = supabase.channel('pending_leads:user_' + currentUser.id)
+       .on('postgres_changes',
+         { event: 'INSERT', schema: 'public', table: 'pending_leads',
+           filter: `user_id=eq.${currentUser.id}` },
+         payload => { pendingLeads.unshift(payload.new);
+                      renderNotificationBadge(); renderNotificationTray(); })
+       .subscribe();
+
+   Cite: project-spec-v3.2-part1.docx Section 10.3
+         "Polling vs Realtime"
+   ──────────────────────────────────────────────────────────
+
+   AUDIT TRAIL:
+   We never DELETE from pending_leads. Dismiss sets
+   status='dismissed' and dismissed_at=now() so the raw_payload
+   stays around. Matters for: spam analysis, accidental-dismiss
+   recovery, lead-source telemetry.
    ============================================================ */
 
-// These are module-level variables — available to all functions
-let currentUser    = null;  // the logged-in user object
-let currentSession = null;  // the auth session (contains access_token)
+// 30 seconds — long enough not to hammer Supabase, short enough
+// that new leads feel near-realtime.
+const PENDING_POLL_MS = 30 * 1000;
 
-// ── SESSION REFRESH ───────────────────────────────────────────
-// Supabase access tokens expire after 1 hour. We refresh silently
-// every 50 minutes so active users are never logged out mid-session.
+// Badge pulse duration when a new lead arrives mid-session.
+// 3 keyframe cycles at 0.6s each ≈ 1.8s. Round up to 2000ms.
+const PENDING_PULSE_MS = 2000;
+
+let pendingLeads     = [];   // status='pending' rows for current user
+let pendingPollTimer = null; // setInterval handle
+let lastPendingCount = 0;    // diff target for pulse trigger
+let trayOpen         = false;
+let expandedLeadId   = null; // only one details panel open at a time
+
+// Fetch the pending leads for this user. Sorted newest first.
+// status=eq.pending filters out accepted/dismissed (audit rows stay in DB).
+// Errors are logged only — a network blip should NOT setSyncing('error')
+// (that would mislead the user into thinking the main app is broken).
+async function loadPendingLeads() {
+  if (BACKEND !== 'supabase' || !currentUser) return;
+
+  try {
+    const rows = await sbFetch('GET',
+      '/rest/v1/pending_leads?select=*&status=eq.pending&order=created_at.desc'
+    );
+    pendingLeads = Array.isArray(rows) ? rows : [];
+
+    // Diff count — pulse badge if it grew. Skip first poll (lastPendingCount=0).
+    const newCount = pendingLeads.length;
+    if (lastPendingCount > 0 && newCount > lastPendingCount) {
+      pulseNotifyBadge();
+    }
+    lastPendingCount = newCount;
+
+    renderNotificationBadge();
+    if (trayOpen) renderNotificationTray();
+  } catch (e) {
+    console.warn('[loadPendingLeads] poll failed:', e.message);
+  }
+}
+
+// Accept a pending lead → create client, mark lead accepted.
+// duplicateConfirmed=true bypasses per-item dup prompt (used by Accept All
+// so we only ask once per batch).
+async function acceptPendingLead(id, duplicateConfirmed = false) {
+  const lead = pendingLeads.find(l => l.id === id);
+  if (!lead) return false;
+
+  // Case-insensitive duplicate detection. Strip whitespace because
+  // "Acme Co " and "acme co" should match — Tally users vary wildly.
+  if (!duplicateConfirmed) {
+    const incomingName = String(lead.name || '').trim().toLowerCase();
+    if (incomingName) {
+      const dup = clients.find(c =>
+        String(c.name || '').trim().toLowerCase() === incomingName
+      );
+      if (dup) {
+        const ok = confirm(`A client named '${dup.name}' already exists. Accept anyway?`);
+        if (!ok) return false;
+      }
+    }
+  }
+
+  // Snapshot for rollback — both tray and board need restoring on failure.
+  const idx = pendingLeads.findIndex(l => l.id === id);
+  const snapshot = { lead, idx };
+
+  // Optimistic UI — remove from tray immediately.
+  pendingLeads.splice(idx, 1);
+  renderNotificationBadge();
+  if (trayOpen) renderNotificationTray();
+
+  setSyncing('syncing');
+
+  let createdClient = null;
+  try {
+    // Build new client. started=today, stage=onboarding (always for new
+    // incoming work), health=green (no signal yet), source='tally' so the
+    // board card shows the tally badge.
+    const today = new Date().toISOString().slice(0, 10);
+    const clientData = {
+      id:      uid(),
+      _isNew:  true,
+      name:    lead.name    || 'Unnamed lead',
+      contact: lead.contact || '',
+      owner:   'CC',
+      stage:   'onboarding',
+      health:  'green',
+      value:   Number(lead.value) || 0,
+      started: today,
+      payment: '',
+      renews:  '',
+      tags:    [],
+      action:  '',
+      notes:   lead.notes   || '',
+      source:  'tally',
+    };
+
+    // Insert via the repository — preserves the BACKEND swap pattern.
+    createdClient = await DB.saveClient(clientData);
+    clients.unshift(createdClient);
+    render();
+
+    // Mark pending row accepted. NEVER DELETE — audit trail.
+    // PATCH with return=representation per CLAUDE.md non-negotiable.
+    const patched = await sbFetch('PATCH',
+      `/rest/v1/pending_leads?id=eq.${id}`,
+      { status: 'accepted', accepted_at: new Date().toISOString() },
+      true
+    );
+    // Fallback GET if Supabase returned empty body.
+    if (!patched || (Array.isArray(patched) && patched.length === 0)) {
+      await sbFetch('GET', `/rest/v1/pending_leads?id=eq.${id}&select=*`);
+    }
+
+    // Telemetry + open first stage history row.
+    trackClientCreated(createdClient);
+    track('lead_accepted', createdClient.id, {
+      pending_lead_id: id,
+      client_id:       createdClient.id,
+    });
+
+    setSyncing('synced');
+    showToast(`${createdClient.name} accepted`);
+    return true;
+
+  } catch (e) {
+    // Rollback both sides of the optimistic update.
+    pendingLeads.splice(snapshot.idx, 0, snapshot.lead);
+    if (createdClient) {
+      // Client was inserted but PATCH failed — pull it back and
+      // best-effort delete from DB so we don't leave a phantom.
+      clients = clients.filter(c => c.id !== createdClient.id);
+      try { await DB.deleteClient(createdClient.id); } catch (_) {}
+    }
+    render();
+    renderNotificationBadge();
+    if (trayOpen) renderNotificationTray();
+    setSyncing('error');
+    showToast('Error accepting lead: ' + e.message);
+    return false;
+  }
+}
+
+// Dismiss a pending lead — soft delete (status='dismissed').
+// Never hard-deletes (preserves audit trail).
+async function dismissPendingLead(id) {
+  const idx = pendingLeads.findIndex(l => l.id === id);
+  if (idx === -1) return false;
+
+  const snapshot = { lead: pendingLeads[idx], idx };
+
+  // Optimistic UI.
+  pendingLeads.splice(idx, 1);
+  renderNotificationBadge();
+  if (trayOpen) renderNotificationTray();
+
+  setSyncing('syncing');
+  try {
+    // PATCH with return=representation per CLAUDE.md.
+    // FUTURE: spec mentions a `reason` property for analytics — not
+    // prompted for in v12 (UX cost not yet justified). Add a reason
+    // picker in v13+ if dismiss volume warrants it.
+    const patched = await sbFetch('PATCH',
+      `/rest/v1/pending_leads?id=eq.${id}`,
+      { status: 'dismissed', dismissed_at: new Date().toISOString() },
+      true
+    );
+    if (!patched || (Array.isArray(patched) && patched.length === 0)) {
+      await sbFetch('GET', `/rest/v1/pending_leads?id=eq.${id}&select=*`);
+    }
+
+    track('lead_dismissed', null, { pending_lead_id: id });
+    setSyncing('synced');
+    showToast('Lead dismissed');
+    return true;
+
+  } catch (e) {
+    pendingLeads.splice(snapshot.idx, 0, snapshot.lead);
+    renderNotificationBadge();
+    if (trayOpen) renderNotificationTray();
+    setSyncing('error');
+    showToast('Error dismissing lead: ' + e.message);
+    return false;
+  }
+}
+
+// Accept all pending leads.
 //
-// Architecture:
-//   sessionRefreshTimer   — the setInterval handle (so we can clear it on logout)
-//   lastActivityTime      — updated on every click/keypress
-//   SESSION_REFRESH_MS    — how often to refresh (50 minutes)
-//   SESSION_IDLE_LIMIT_MS — how long idle before we stop refreshing and let it expire
-//
+// PER-ITEM vs BATCH duplicate prompt tradeoff:
+// We chose ONE batch confirm if any duplicates exist, rather than asking
+// per-item. WHY: if a user clicks "Accept All" they've already decided
+// these leads are wanted; serial prompts feel like the app is fighting
+// them. The single up-front warning surfaces risk once and then runs.
+// If telemetry later shows accidental accepts, switch to per-item
+// prompts — this comment marks the design call for the next maintainer.
+async function acceptAllPending() {
+  if (pendingLeads.length === 0) return;
+
+  // Snapshot — pendingLeads mutates as we iterate.
+  const toAccept = pendingLeads.slice();
+
+  // Pre-scan for duplicates so we can ask once.
+  const dupCount = toAccept.filter(lead => {
+    const n = String(lead.name || '').trim().toLowerCase();
+    return n && clients.some(c => String(c.name || '').trim().toLowerCase() === n);
+  }).length;
+
+  if (dupCount > 0) {
+    const ok = confirm(
+      `${dupCount} pending lead${dupCount === 1 ? '' : 's'} include possible duplicates. ` +
+      `Accept all anyway?`
+    );
+    if (!ok) return;
+  }
+
+  // Serial processing — parallel POSTs would race against the local
+  // clients array and break optimistic UI / rollback semantics.
+  let accepted = 0;
+  for (const lead of toAccept) {
+    const ok = await acceptPendingLead(lead.id, true /* duplicateConfirmed */);
+    if (ok) accepted++;
+  }
+
+  if (accepted > 0) showToast(`${accepted} lead${accepted === 1 ? '' : 's'} accepted`);
+}
+
+// Dismiss all pending leads. No duplicate concern — dismissals don't
+// create clients. The tray IS the preview; if user hits Dismiss All
+// they've already reviewed.
+async function dismissAllPending() {
+  if (pendingLeads.length === 0) return;
+
+  const ok = confirm(
+    `Dismiss all ${pendingLeads.length} pending lead${pendingLeads.length === 1 ? '' : 's'}?`
+  );
+  if (!ok) return;
+
+  const toDismiss = pendingLeads.slice();
+  let dismissed = 0;
+  for (const lead of toDismiss) {
+    const ok2 = await dismissPendingLead(lead.id);
+    if (ok2) dismissed++;
+  }
+
+  if (dismissed > 0) showToast(`${dismissed} lead${dismissed === 1 ? '' : 's'} dismissed`);
+}
+
+// Start polling — called from auth lifecycle (same shape as
+// startSessionRefresh so the two pair cleanly).
+function startPendingPolling() {
+  stopPendingPolling(); // idempotent
+
+  // Immediate fetch so the badge populates without waiting 30s.
+  loadPendingLeads();
+
+  pendingPollTimer = setInterval(loadPendingLeads, PENDING_POLL_MS);
+  console.log('Pending lead polling started — every 30 seconds.');
+}
+
+// Stop polling — called on signOut alongside stopSessionRefresh.
+function stopPendingPolling() {
+  if (pendingPollTimer) {
+    clearInterval(pendingPollTimer);
+    pendingPollTimer = null;
+  }
+  pendingLeads     = [];
+  lastPendingCount = 0;
+  renderNotificationBadge();
+}
+
+
+/* ============================================================
+   SECTION 6: AUTH
+   v12: startPendingPolling() is wired into the auth lifecycle
+   alongside startSessionRefresh(). Both start/stop together.
+   ============================================================ */
+
+let currentUser    = null;
+let currentSession = null;
+
 const SESSION_REFRESH_MS    = 50 * 60 * 1000; // 50 minutes
-const SESSION_IDLE_LIMIT_MS = 60 * 60 * 1000; // 60 minutes idle = truly expired
+const SESSION_IDLE_LIMIT_MS = 60 * 60 * 1000; // 60 minutes
 
-let sessionRefreshTimer  = null;
-let lastActivityTime     = Date.now();
+let sessionRefreshTimer = null;
+let lastActivityTime    = Date.now();
 
-// Track user activity — any click or keypress resets the idle clock
 function trackActivity() {
   lastActivityTime = Date.now();
 }
 
-// Call Supabase to exchange the refresh_token for a new access_token.
-// Updates currentSession and localStorage on success.
-// On failure, clears the session and returns the user to login.
 async function refreshSession() {
   if (!currentSession?.refresh_token) return;
 
-  // If user has been idle longer than SESSION_IDLE_LIMIT_MS, let the
-  // session expire naturally — don't silently refresh a stale session.
   const idleTime = Date.now() - lastActivityTime;
   if (idleTime > SESSION_IDLE_LIMIT_MS) {
     console.log('Session idle — allowing expiry instead of refreshing.');
     stopSessionRefresh();
+    stopPendingPolling(); // v12: stop lead poll alongside session
     currentUser    = null;
     currentSession = null;
     clients        = [];
@@ -1395,7 +1278,6 @@ async function refreshSession() {
 
     const data = await response.json();
 
-    // Update session with new tokens
     currentSession = {
       access_token:  data.access_token,
       refresh_token: data.refresh_token || currentSession.refresh_token,
@@ -1403,7 +1285,6 @@ async function refreshSession() {
     };
     if (data.user) currentUser = data.user;
 
-    // Persist the refreshed session
     localStorage.setItem('cwc-session', JSON.stringify({
       session: currentSession,
       user:    currentUser,
@@ -1412,9 +1293,9 @@ async function refreshSession() {
     console.log('Session refreshed silently at', new Date().toLocaleTimeString());
 
   } catch (e) {
-    // Refresh token is invalid or expired — force sign out
     console.warn('Session refresh failed:', e.message);
     stopSessionRefresh();
+    stopPendingPolling(); // v12
     currentUser    = null;
     currentSession = null;
     clients        = [];
@@ -1424,24 +1305,18 @@ async function refreshSession() {
   }
 }
 
-// Start the recurring refresh timer and activity listeners.
-// Call this once after every successful login or session restore.
 function startSessionRefresh() {
-  stopSessionRefresh(); // clear any existing timer first
+  stopSessionRefresh();
 
-  // Refresh every 50 minutes
   sessionRefreshTimer = setInterval(refreshSession, SESSION_REFRESH_MS);
 
-  // Track activity on click and keypress — resets lastActivityTime
   document.addEventListener('click',   trackActivity, { passive: true });
   document.addEventListener('keydown', trackActivity, { passive: true });
 
-  lastActivityTime = Date.now(); // reset on start
+  lastActivityTime = Date.now();
   console.log('Session refresh started — will refresh every 50 minutes.');
 }
 
-// Stop the refresh timer and remove activity listeners.
-// Call this on sign out or session expiry.
 function stopSessionRefresh() {
   if (sessionRefreshTimer) {
     clearInterval(sessionRefreshTimer);
@@ -1451,7 +1326,6 @@ function stopSessionRefresh() {
   document.removeEventListener('keydown', trackActivity);
 }
 
-// Called when user clicks "Sign In"
 async function signIn() {
   const email    = document.getElementById('si-email').value.trim();
   const password = document.getElementById('si-password').value;
@@ -1463,7 +1337,6 @@ async function signIn() {
 
   setAuthLoading('signInBtn', true);
   try {
-    // Supabase auth endpoint — grant_type=password is email/password login
     const response = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
@@ -1473,16 +1346,13 @@ async function signIn() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error_description || data.msg || 'Sign in failed');
 
-    // Supabase password login returns the session and user at the top level.
-    // We store them explicitly to ensure access_token is always accessible
-    // via currentSession.access_token regardless of response structure.
     currentSession = {
       access_token:  data.access_token,
       refresh_token: data.refresh_token,
       token_type:    data.token_type || 'bearer',
     };
     currentUser = data.user;
-    onAuthSuccess(true); // skipWelcome=true — returning user, no need for welcome moment
+    onAuthSuccess(true);
 
   } catch (e) {
     showAuthError(e.message);
@@ -1491,7 +1361,6 @@ async function signIn() {
   }
 }
 
-// Called when user clicks "Create Account"
 async function signUp() {
   const email    = document.getElementById('su-email').value.trim();
   const password = document.getElementById('su-password').value;
@@ -1511,25 +1380,20 @@ async function signUp() {
     if (!response.ok) throw new Error(data.error_description || data.msg || 'Sign up failed');
 
     if (data.session) {
-      // Clean path — confirmation off, Supabase returned a session immediately
       currentSession = data.session;
       currentUser    = data.user;
-      onAuthSuccess(false); // false = show welcome animation
+      onAuthSuccess(false);
 
     } else if (data.user && data.user.identities && data.user.identities.length === 0) {
-      // User already exists in Supabase — identities array is empty when duplicate
       showAuthError('An account with this email already exists. Try signing in instead.');
 
     } else if (data.user && TEST_MODE) {
-      // TEST MODE: Supabase returned a user but no session.
-      // Attempt immediate sign-in with the same credentials.
-      // This path is only active when TEST_MODE = true.
+      // TEST MODE path — auto sign-in after signup. Only active when TEST_MODE=true.
       document.getElementById('authError').classList.remove('show');
       document.getElementById('signUpPanel').style.display  = 'none';
       document.getElementById('signInPanel').style.display  = 'none';
       document.getElementById('confirmPanel').style.display = 'none';
       document.getElementById('welcomePanel').style.display = 'none';
-      // Show a simple loading message while we attempt auto sign-in
       const loadingDiv = document.createElement('div');
       loadingDiv.id = 'autoSigninLoader';
       loadingDiv.style.cssText = 'text-align:center;padding:20px 0';
@@ -1543,11 +1407,9 @@ async function signUp() {
       });
       const signinData = await signinRes.json();
 
-      // Remove the loading div
       document.getElementById('autoSigninLoader')?.remove();
 
       if (signinRes.ok && signinData.access_token) {
-        // Sign-in succeeded — show welcome animation
         currentSession = {
           access_token:  signinData.access_token,
           refresh_token: signinData.refresh_token,
@@ -1556,15 +1418,11 @@ async function signUp() {
         currentUser = signinData.user;
         onAuthSuccess(false);
       } else {
-        // Auto sign-in failed — fall back to confirm screen
         showPanel('confirm', email);
       }
 
     } else {
-      // PRODUCTION PATH: no session returned — email confirmation required.
-      // Show the "Check your email" screen and wait for the user to confirm.
-      // This is the correct production flow when TEST_MODE = false,
-      // confirmation is enabled, and SMTP is properly configured.
+      // PRODUCTION PATH — email confirmation required.
       showPanel('confirm', email);
     }
 
@@ -1575,10 +1433,8 @@ async function signUp() {
   }
 }
 
-// Called when user clicks "Sign out"
 async function signOut() {
   try {
-    // Tell Supabase to invalidate the session server-side
     await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
       method: 'POST',
       headers: {
@@ -1587,59 +1443,46 @@ async function signOut() {
       },
     });
   } catch (e) {
-    // Ignore errors — we're logging out regardless
+    // Ignore — logging out regardless.
   }
 
-  // Clear all local state
   currentUser    = null;
   currentSession = null;
   clients        = [];
-  stopSessionRefresh();                          // stop the refresh timer and activity listeners
-  localStorage.removeItem('cwc-session');        // remove saved session
-  localStorage.removeItem('cwc-auth-event');     // remove cross-tab sync marker
+  closeNotificationTray();    // v12: ensure tray isn't left open
+  stopSessionRefresh();
+  stopPendingPolling();       // v12: stop pending lead polling
+  localStorage.removeItem('cwc-session');
+  localStorage.removeItem('cwc-auth-event');
 
-  showAppState(false); // return to login screen
+  showAppState(false);
 }
 
-// Called after a successful sign in or sign up.
-// Shows a brief welcome moment before transitioning to the app —
-// makes auto-login feel intentional rather than abrupt.
 function onAuthSuccess(skipWelcome = false) {
-  // Persist session so the user stays logged in on refresh
   localStorage.setItem('cwc-session', JSON.stringify({
     session: currentSession,
     user:    currentUser,
   }));
 
-  // Start the silent 50-minute refresh cycle — keeps session alive
-  // as long as the user is active. Must be called after every login.
   startSessionRefresh();
+  startPendingPolling(); // v12: start polling alongside session refresh
 
-  // Broadcast login to any other open tabs (e.g. the original
-  // "Check your email" tab that's still open)
   localStorage.setItem('cwc-auth-event', Date.now().toString());
 
   if (skipWelcome) {
-    // Returning user — skip the welcome, go straight to the app
     showAppState(true);
     loadClients();
-    // Delay tracking until session is fully established in Supabase.
-    // Firing immediately causes a 403 because the session token hasn't
-    // propagated yet on the first call after a URL-hash confirmation login.
     setTimeout(() => track('session_started', null, { returning: skipWelcome }), 2000);
   } else {
-    // New confirmation — show a brief welcome moment
     showPanel('welcome');
     setTimeout(() => {
       showAppState(true);
       loadClients();
-      // Track after welcome animation — session is definitely ready by now
       setTimeout(() => track('session_started', null, { returning: false }), 1000);
-    }, 4000); // 4 seconds — enough to read and feel the positive affirmation
+    }, 4000);
   }
 }
 
-// Show or hide the app vs the auth screen
 function showAppState(loggedIn) {
   document.getElementById('authScreen').style.display = loggedIn ? 'none'  : 'flex';
   document.getElementById('topbar').style.display     = loggedIn ? 'flex'  : 'none';
@@ -1647,8 +1490,6 @@ function showAppState(loggedIn) {
   document.getElementById('main').style.display       = loggedIn ? 'block' : 'none';
   document.getElementById('footer').style.display     = loggedIn ? 'flex'  : 'none';
 
-  // When returning to auth screen (logout), always reset to sign-in panel
-  // and hide the welcome panel — prevents welcome animation showing on logout
   if (!loggedIn) {
     document.getElementById('welcomePanel').style.display  = 'none';
     document.getElementById('signInPanel').style.display   = 'block';
@@ -1657,38 +1498,25 @@ function showAppState(loggedIn) {
     document.getElementById('authError').classList.remove('show');
   }
 
-  // Populate user info in topbar
   if (loggedIn && currentUser) {
     const email = currentUser.email || '';
     document.getElementById('userEmail').textContent  = email;
-    // Use first two letters of email as avatar initials
     document.getElementById('userAvatar').textContent = email.slice(0, 2).toUpperCase();
   }
 }
 
-// showPanel is defined below in the animation section, alongside startInkAnimation,
-// so it can wrap the animation trigger cleanly.
-
-// Show an error message in the auth error banner
 function showAuthError(msg) {
   const el = document.getElementById('authError');
   el.textContent = msg;
   el.classList.add('show');
 }
 
-// ── ENTER KEY SUBMISSION ON AUTH FORMS ───────────────────────
-// Pressing Enter in any auth form field triggers the relevant
-// action — same as clicking the button. The button stays visible
-// so mouse users aren't confused, but keyboard users don't need it.
 document.addEventListener('DOMContentLoaded', () => {
-  // Sign in fields — both trigger signIn()
   ['si-email', 'si-password'].forEach(id => {
     document.getElementById(id)?.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); signIn(); }
     });
   });
-
-  // Sign up fields — both trigger signUp()
   ['su-email', 'su-password'].forEach(id => {
     document.getElementById(id)?.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); signUp(); }
@@ -1696,7 +1524,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-// Disable button and show loading text while request is in flight
 function setAuthLoading(btnId, loading) {
   const btn     = document.getElementById(btnId);
   btn.disabled  = loading;
@@ -1708,14 +1535,8 @@ function setAuthLoading(btnId, loading) {
 
 /* ============================================================
    SECTION 7: APP STATE
-   ─────────────────────────────────────────────────────────────
-   Global variables and constants that define the app's state.
-   These are the source of truth for what the UI shows.
    ============================================================ */
 
-// Stage definitions — order here = order of columns in board view.
-// To add a new stage: add an entry here AND add a new option
-// to the f-stage select in the modal HTML above.
 const STAGES = [
   { key: 'onboarding', label: 'Onboarding',     color: '#2F4F4F' },
   { key: 'active',     label: 'Active Delivery', color: '#4A7C59' },
@@ -1724,7 +1545,6 @@ const STAGES = [
   { key: 'churned',    label: 'Churned',         color: '#A8A09A' },
 ];
 
-// Maps stage key → CSS class for table view stage pills
 const STAGE_PILL = {
   onboarding: 'sp-onboarding',
   active:     'sp-active',
@@ -1733,16 +1553,14 @@ const STAGE_PILL = {
   churned:    'sp-churned',
 };
 
-let clients       = [];    // array of all client objects for current user
-let currentView   = 'board'; // 'board' or 'table'
-let activeFilters = {};    // e.g. { overdue: true, risk: false }
-let editingId     = null;  // id of client being edited in modal, or null for new
-let deletedClient = null;  // { client, idx } — stored for undo functionality
-let toastTimer    = null;  // timeout handle for auto-hiding toast
-let dragId        = null;  // id of card currently being dragged
+let clients       = [];
+let currentView   = 'board';
+let activeFilters = {};
+let editingId     = null;
+let deletedClient = null;
+let toastTimer    = null;
+let dragId        = null;
 
-// Demo data — 8 clients across all stages with varied health/payment states.
-// Dates are relative to today so the demo always looks current.
 const DEMO_CLIENTS = [
   { name:'Northwind Studios',    contact:'Phoebe Marsh · phoebe@northwindstudios.com', owner:'CC', stage:'active',     health:'green', value:6500, started:daysFromNow(-60),  payment:daysFromNow(8),   renews:daysFromNow(45),  tags:['branding','web','ongoing'],   action:'Send updated homepage mockup for sign-off',         notes:'Long-term retainer. Very happy with progress.' },
   { name:'Heartwood Bakery',     contact:'Sam Keller · sam@heartwoodbakery.co',         owner:'MR', stage:'active',     health:'amber', value:3200, started:daysFromNow(-90),  payment:daysFromNow(-3),  renews:daysFromNow(22),  tags:['social','content'],           action:'Follow up on overdue invoice — second reminder',    notes:'Late payer historically. Contract renews soon.' },
@@ -1757,41 +1575,31 @@ const DEMO_CLIENTS = [
 
 /* ============================================================
    UTILITY FUNCTIONS
-   Small helpers used throughout the app.
    ============================================================ */
 
-// Generate a random unique ID (not cryptographically secure,
-// but fine for local state management)
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-// Return a date string N days from today (negative = past)
-// e.g. daysFromNow(-3) = 3 days ago, daysFromNow(14) = 2 weeks from now
 function daysFromNow(n) {
   const d = new Date();
   d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10); // "YYYY-MM-DD"
+  return d.toISOString().slice(0, 10);
 }
 
-// Calculate how many days until (positive) or since (negative) a date.
-// Returns null if no date provided.
 function daysDiff(dateStr) {
   if (!dateStr) return null;
   const target = new Date(dateStr);
   const now    = new Date();
-  now.setHours(0, 0, 0, 0); // compare dates only, not times
+  now.setHours(0, 0, 0, 0);
   return Math.round((target - now) / (1000 * 60 * 60 * 24));
 }
 
-// Format a number as currency: 6500 → "$6,500"
 function fmtVal(v) {
   if (!v) return '$0';
   return '$' + Number(v).toLocaleString();
 }
 
-// Escape special HTML characters to prevent XSS attacks.
-// Always use this when inserting user-provided text into HTML.
 function esc(s) {
   return String(s || '')
     .replace(/&/g, '&amp;')
@@ -1800,8 +1608,6 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
-// Update the sync indicator dot and label
-// state: 'syncing' | 'synced' | 'error'
 function setSyncing(state) {
   const dot   = document.getElementById('syncDot');
   const label = document.getElementById('syncLabel');
@@ -1810,17 +1616,31 @@ function setSyncing(state) {
   label.textContent = state === 'syncing' ? 'Syncing…' : state === 'error' ? 'Sync error' : 'Synced';
 }
 
+// v12: relative time string. Loose-grained — exact timestamps live
+// in the details panel. "just now", "2 min ago", "3 hr ago", "2 days ago".
+function formatRelativeTime(ts) {
+  if (!ts) return '';
+  const then = new Date(ts).getTime();
+  const now  = Date.now();
+  const sec  = Math.max(0, Math.round((now - then) / 1000));
+
+  if (sec < 30) return 'just now';
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} min ago`;
+  const hr  = Math.round(min / 60);
+  if (hr  < 24) return `${hr} hr ago`;
+  const day = Math.round(hr / 24);
+  if (day < 7)  return `${day} day${day === 1 ? '' : 's'} ago`;
+  // Beyond a week, fall back to date — leads that old should be rare.
+  return new Date(ts).toLocaleDateString();
+}
+
 
 /* ============================================================
    SECTION 8: RENDER FUNCTIONS
-   ─────────────────────────────────────────────────────────────
-   These functions build the HTML for the board and table views.
-   They read from the global `clients` array and write to the
-   #main element. Called after any data change.
    ============================================================ */
 
-// Load clients from the database and render the view.
-// Shows a loading spinner while the fetch is in progress.
 async function loadClients() {
   document.getElementById('main').innerHTML = `
     <div class="loading-screen">
@@ -1840,15 +1660,10 @@ async function loadClients() {
   }
 }
 
-// Return a filtered subset of clients based on:
-// 1. The search input (matches name or contact)
-// 2. Active filter chips (overdue, risk, renewing)
 function getFiltered() {
   const query = (document.getElementById('searchInput')?.value || '').toLowerCase();
   return clients.filter(c => {
-    // Search filter
     if (query && !c.name.toLowerCase().includes(query) && !(c.contact || '').toLowerCase().includes(query)) return false;
-    // Chip filters
     if (activeFilters.overdue)  { const d = daysDiff(c.payment); if (d === null || d >= 0) return false; }
     if (activeFilters.risk)     { if (c.health !== 'red') return false; }
     if (activeFilters.renewing) { const d = daysDiff(c.renews); if (d === null || d < 0 || d > 30) return false; }
@@ -1856,8 +1671,6 @@ function getFiltered() {
   });
 }
 
-// Recalculate and update the four stat numbers in the topbar,
-// and update the filter chip counts. Called on every render.
 function updateStats() {
   const active   = clients.filter(c => c.stage !== 'churned');
   const totalVal = active.reduce((sum, c) => sum + Number(c.value || 0), 0);
@@ -1870,17 +1683,14 @@ function updateStats() {
   document.getElementById('stat-overdue-num').textContent = overdue;
   document.getElementById('stat-risk-num').textContent    = risk;
 
-  // Turn stats red when count > 0 for dangerous metrics
   document.getElementById('stat-overdue').classList.toggle('alert', overdue > 0);
   document.getElementById('stat-risk').classList.toggle('alert', risk > 0);
 
-  // Update chip counts
   document.getElementById('chip-overdue-count').textContent  = overdue;
   document.getElementById('chip-risk-count').textContent     = risk;
   document.getElementById('chip-renewing-count').textContent = renewing;
 }
 
-// Switch between board and table view
 function setView(v) {
   currentView = v;
   document.getElementById('btn-board').classList.toggle('active', v === 'board');
@@ -1889,7 +1699,6 @@ function setView(v) {
   render();
 }
 
-// Toggle a filter chip on/off and re-render
 function toggleFilter(f) {
   activeFilters[f] = !activeFilters[f];
   document.getElementById('chip-' + f).classList.toggle('active', activeFilters[f]);
@@ -1897,7 +1706,6 @@ function toggleFilter(f) {
   render();
 }
 
-// Main render function — decides which view to show
 function render() {
   updateStats();
   if (clients.length === 0) { renderEmpty(); return; }
@@ -1905,7 +1713,6 @@ function render() {
   else renderTable();
 }
 
-// Render the empty state (no clients yet)
 function renderEmpty() {
   document.getElementById('main').innerHTML = `
     <div class="empty-state">
@@ -1931,7 +1738,6 @@ function renderEmpty() {
     </div>`;
 }
 
-// Render the Kanban board — one column per stage
 function renderBoard() {
   const filtered = getFiltered();
   let html = '<div class="board">';
@@ -1957,7 +1763,6 @@ function renderBoard() {
   html += '</div>';
   document.getElementById('main').innerHTML = html;
 
-  // Attach drag and click listeners to each card after rendering
   document.querySelectorAll('.card').forEach(el => {
     el.addEventListener('dragstart', e => dragStart(e, el.dataset.id));
     el.addEventListener('dragend',   dragEnd);
@@ -1965,19 +1770,15 @@ function renderBoard() {
   });
 }
 
-// Build the HTML string for a single client card.
-// Returns a string (not a DOM element) for fast innerHTML injection.
 function cardHTML(c) {
   const payDiff    = daysDiff(c.payment);
   const renewDiff  = daysDiff(c.renews);
   const isOverdue  = payDiff   !== null && payDiff   < 0;
   const isRenewing = renewDiff !== null && renewDiff >= 0 && renewDiff <= 30;
 
-  // Days in current stage (since started date)
   const started = c.started ? new Date(c.started) : new Date();
   const daysIn  = Math.round((new Date() - started) / (1000 * 60 * 60 * 24));
 
-  // Payment text: "in 8d" or "3d overdue"
   const payText = payDiff !== null
     ? (isOverdue ? `${Math.abs(payDiff)}d overdue` : `in ${payDiff}d`)
     : '';
@@ -2028,14 +1829,13 @@ function cardHTML(c) {
     </div>`;
 }
 
-// Render the table view — sorted: overdues first, then by value descending
 function renderTable() {
   const filtered = getFiltered().slice().sort((a, b) => {
     const aOverdue = daysDiff(a.payment) !== null && daysDiff(a.payment) < 0;
     const bOverdue = daysDiff(b.payment) !== null && daysDiff(b.payment) < 0;
-    if (aOverdue && !bOverdue) return -1; // overdues first
+    if (aOverdue && !bOverdue) return -1;
     if (!aOverdue && bOverdue) return  1;
-    return Number(b.value || 0) - Number(a.value || 0); // then by value desc
+    return Number(b.value || 0) - Number(a.value || 0);
   });
 
   const rows = filtered.map(c => {
@@ -2080,22 +1880,153 @@ function renderTable() {
 
 
 /* ============================================================
-   SECTION 9: MODAL (ADD / EDIT CLIENT)
+   SECTION 8B: NOTIFICATION RENDERING (v12)
    ─────────────────────────────────────────────────────────────
-   The modal serves double duty: adding new clients and editing
-   existing ones. The editingId variable tracks which mode we're
-   in (null = new client, string = editing that client's id).
+   Topbar badge + slide-in tray. Its own section because pending
+   leads are a parallel queue alongside clients, not a view of
+   the same data.
    ============================================================ */
 
-// Open the modal. If id is provided, populate with that client's data.
+// Update the topbar badge. Hides entirely at 0 (stale zero = noise).
+function renderNotificationBadge() {
+  const badge = document.getElementById('notifyBadge');
+  const count = document.getElementById('notifyBadgeCount');
+  if (!badge || !count) return;
+
+  const n = pendingLeads.length;
+  count.textContent = String(n);
+  badge.classList.toggle('has-leads', n > 0);
+}
+
+// Fire the pulse animation briefly when poll discovers higher count.
+function pulseNotifyBadge() {
+  const badge = document.getElementById('notifyBadge');
+  if (!badge) return;
+  badge.classList.add('pulse');
+  setTimeout(() => badge.classList.remove('pulse'), PENDING_PULSE_MS);
+}
+
+function toggleNotificationTray() {
+  if (trayOpen) closeNotificationTray();
+  else          openNotificationTray();
+}
+
+function openNotificationTray() {
+  trayOpen = true;
+  document.getElementById('notifyTray').classList.add('open');
+  document.getElementById('trayOverlay').classList.add('open');
+  document.getElementById('notifyTray').setAttribute('aria-hidden', 'false');
+  renderNotificationTray();
+}
+
+function closeNotificationTray() {
+  trayOpen = false;
+  expandedLeadId = null; // collapse details on close so reopens are clean
+  document.getElementById('notifyTray').classList.remove('open');
+  document.getElementById('trayOverlay').classList.remove('open');
+  document.getElementById('notifyTray').setAttribute('aria-hidden', 'true');
+}
+
+// Only one detail panel open at a time — keeps the tray scannable.
+function toggleLeadDetails(id) {
+  expandedLeadId = (expandedLeadId === id) ? null : id;
+  renderNotificationTray();
+}
+
+function renderNotificationTray() {
+  const body  = document.getElementById('trayBody');
+  const count = document.getElementById('trayCount');
+  const bulk  = document.getElementById('trayBulk');
+  if (!body) return;
+
+  count.textContent = String(pendingLeads.length);
+
+  // Hide bulk actions when nothing to act on — reduces visual noise.
+  bulk.style.display = pendingLeads.length > 0 ? 'flex' : 'none';
+
+  if (pendingLeads.length === 0) {
+    body.innerHTML = `
+      <div class="tray-empty">
+        <div class="tray-empty-icon">
+          <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.4">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+            <polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+        </div>
+        <div>No pending leads.<br>New submissions appear here.</div>
+      </div>`;
+    return;
+  }
+
+  body.innerHTML = pendingLeads.map(lead => leadCardHTML(lead)).join('');
+}
+
+// Build HTML for a single pending lead card.
+// All user-controlled strings flow through esc() to prevent XSS.
+function leadCardHTML(lead) {
+  const name       = lead.name && lead.name.trim() ? lead.name : 'Unnamed lead';
+  const time       = formatRelativeTime(lead.created_at);
+  const isExpanded = expandedLeadId === lead.id;
+
+  // Only show meta fields that have a value — empty rows look broken.
+  const metaParts = [];
+  if (lead.value)   metaParts.push(`<span class="lead-meta-item"><span class="lead-meta-label">Value</span> <span class="lead-meta-value">${esc(fmtVal(lead.value))}/mo</span></span>`);
+  if (lead.contact) metaParts.push(`<span class="lead-meta-item"><span class="lead-meta-label">Contact</span> <span class="lead-meta-value">${esc(lead.contact)}</span></span>`);
+  const metaRow = metaParts.length
+    ? `<div class="lead-meta">${metaParts.join('')}</div>`
+    : '';
+
+  // Pretty-print payload for details view. Try/catch because raw_payload
+  // is jsonb but could in theory contain circular refs after some future
+  // migration — be defensive.
+  let payloadStr = '';
+  try {
+    payloadStr = lead.raw_payload
+      ? JSON.stringify(lead.raw_payload, null, 2)
+      : '(no raw payload)';
+  } catch (_) {
+    payloadStr = '(payload could not be serialized)';
+  }
+
+  return `
+    <div class="lead-card" data-lead-id="${esc(lead.id)}">
+      <div class="lead-card-top">
+        <div class="lead-name">${esc(name)}</div>
+        <div class="lead-time">${esc(time)}</div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <span class="source-badge pending">Pending · Tally</span>
+      </div>
+      ${metaRow}
+      <div class="lead-actions">
+        <button class="btn btn-primary btn-sm" onclick="acceptPendingLead('${esc(lead.id)}')">Accept</button>
+        <button class="btn btn-ghost btn-sm"   onclick="dismissPendingLead('${esc(lead.id)}')">Dismiss</button>
+        <button class="btn btn-ghost btn-sm"   onclick="toggleLeadDetails('${esc(lead.id)}')">
+          ${isExpanded ? 'Hide details' : 'View details'}
+        </button>
+      </div>
+      <div class="lead-details ${isExpanded ? 'open' : ''}">
+        ${lead.notes ? `
+          <div class="lead-details-label">Notes</div>
+          <div class="lead-details-notes">${esc(lead.notes)}</div>
+        ` : ''}
+        <div class="lead-details-label">Raw payload</div>
+        <pre class="lead-details-payload">${esc(payloadStr)}</pre>
+      </div>
+    </div>`;
+}
+
+
+/* ============================================================
+   SECTION 9: MODAL (ADD / EDIT CLIENT)
+   ============================================================ */
+
 function openModal(id) {
   editingId = id || null;
   const c   = id ? clients.find(x => x.id === id) : null;
 
-  // Set title based on mode
   document.getElementById('modalTitle').textContent = c ? c.name : 'New Client';
 
-  // Populate form fields — use existing values or sensible defaults
   document.getElementById('f-name').value    = c?.name    || '';
   document.getElementById('f-contact').value = c?.contact || '';
   document.getElementById('f-owner').value   = c?.owner   || 'CC';
@@ -2109,7 +2040,6 @@ function openModal(id) {
   document.getElementById('f-action').value  = c?.action  || '';
   document.getElementById('f-notes').value   = c?.notes   || '';
 
-  // Show delete button only when editing (not for new clients)
   document.getElementById('deleteBtn').style.display = c ? 'flex' : 'none';
 
   document.getElementById('modalOverlay').classList.add('open');
@@ -2121,15 +2051,10 @@ function closeModal() {
   editingId = null;
 }
 
-// Close modal when clicking the dark overlay (but not the modal itself)
 function handleOverlayClick(e) {
   if (e.target === document.getElementById('modalOverlay')) closeModal();
 }
 
-// Save on Enter key while the modal is open.
-// Skips textarea (notes field) where Enter adds a new line.
-// Skips select dropdowns where Enter is used for selection.
-// Future: make this a user preference in account settings (auto-save on Enter vs not).
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
   if (!document.getElementById('modalOverlay').classList.contains('open')) return;
@@ -2139,7 +2064,6 @@ document.addEventListener('keydown', e => {
   saveClient();
 });
 
-// Collect form values, validate, save to DB, update local state, re-render
 async function saveClient() {
   const name = document.getElementById('f-name').value.trim();
   if (!name) {
@@ -2148,19 +2072,16 @@ async function saveClient() {
     return;
   }
 
-  // Snapshot the existing client values BEFORE any changes are made.
-  // Used below to build a precise diff for the client_updated event.
-  // Fields we care about tracking changes on — all the meaningful ones.
+  // Snapshot for the diff in client_updated event.
   const TRACKED_FIELDS = ['name','contact','owner','stage','health','value','started','payment','renews','tags','action','notes'];
   const oldClient = editingId ? clients.find(c => c.id === editingId) : null;
 
-  // Parse tags from comma-separated string → array
   const tags = document.getElementById('f-tags').value
     .split(',').map(t => t.trim()).filter(Boolean);
 
   const data = {
-    id:      editingId || uid(),  // new clients get a temp id; Supabase replaces it
-    _isNew:  !editingId,          // flag for DB.saveClient() to know insert vs update
+    id:      editingId || uid(),
+    _isNew:  !editingId,
     name,
     contact: document.getElementById('f-contact').value.trim(),
     owner:   document.getElementById('f-owner').value.trim().toUpperCase().slice(0, 3) || 'CC',
@@ -2175,22 +2096,18 @@ async function saveClient() {
     notes:   document.getElementById('f-notes').value.trim(),
   };
 
-  // Capture the ID before closing the modal — closeModal() sets editingId = null
-  // so we must save it now or the local array update below will fail to find the row.
+  // Capture editingId BEFORE closeModal() — closeModal sets it to null
+  // (CLAUDE.md non-negotiable).
   const savedId = editingId;
 
   closeModal();
   setSyncing('syncing');
 
   try {
-    const saved = await DB.saveClient(data); // returns record with final id from DB
+    const saved = await DB.saveClient(data);
 
-    // Update local clients array with the data returned from Supabase.
-    // Using savedId (not editingId which is now null after closeModal).
-    // This ensures the card and form both reflect the saved values immediately
-    // without requiring a page refresh or re-login.
     if (data._isNew) {
-      clients.unshift(saved); // add to top
+      clients.unshift(saved);
     } else {
       const idx = clients.findIndex(c => c.id === savedId);
       if (idx !== -1) clients[idx] = saved;
@@ -2200,18 +2117,15 @@ async function saveClient() {
     render();
     showToast(data._isNew ? 'Client added' : 'Client updated');
 
-    // Track the action — fire and forget after UI is updated
     if (data._isNew) {
       track('client_created', saved.id, {
         stage:  saved.stage,
         health: saved.health,
         value:  saved.value,
       });
-      trackClientCreated(saved); // open the first stage history row
+      trackClientCreated(saved);
     } else {
-      // Build a precise diff — only record fields that actually changed.
-      // Comparing old snapshot (captured before modal was opened) against
-      // the newly saved values. Tags are arrays so we compare as strings.
+      // Precise diff — only record fields that actually changed.
       const changed = [];
       const oldVals = {};
       const newVals = {};
@@ -2231,12 +2145,11 @@ async function saveClient() {
         }
       });
 
-      // Only fire the event if something actually changed
       if (changed.length > 0) {
         track('client_updated', saved.id, {
-          changed, // array of field names that changed e.g. ['health', 'value']
-          old: oldVals, // previous values keyed by field name
-          new: newVals, // new values keyed by field name
+          changed,
+          old: oldVals,
+          new: newVals,
         });
       }
     }
@@ -2247,19 +2160,15 @@ async function saveClient() {
   }
 }
 
-// Delete client with optimistic UI update — remove from screen
-// immediately, then delete from DB. Supports undo for 3.5 seconds.
 async function deleteClient() {
   if (!editingId) return;
 
   const idx = clients.findIndex(c => c.id === editingId);
   if (idx === -1) return;
 
-  // Store for potential undo
   deletedClient = { client: clients[idx], idx };
   const id = editingId;
 
-  // Optimistically remove from UI immediately (feels fast)
   clients.splice(idx, 1);
   closeModal();
   render();
@@ -2268,10 +2177,10 @@ async function deleteClient() {
   try {
     await DB.deleteClient(id);
     setSyncing('synced');
-    showToast('Client deleted', true); // true = show undo button
+    showToast('Client deleted', true);
     track('client_deleted', id, { name: deletedClient.client.name, stage: deletedClient.client.stage });
   } catch (e) {
-    // Rollback — put the client back if the delete failed
+    // Rollback
     clients.splice(deletedClient.idx, 0, deletedClient.client);
     render();
     setSyncing('error');
@@ -2279,7 +2188,6 @@ async function deleteClient() {
   }
 }
 
-// Restore the last deleted client (called by toast "Undo" button)
 async function undoDelete() {
   if (!deletedClient) return;
 
@@ -2288,7 +2196,7 @@ async function undoDelete() {
 
   try {
     const saved = await DB.saveClient(c);
-    clients.splice(deletedClient.idx, 0, saved); // restore at original position
+    clients.splice(deletedClient.idx, 0, saved);
     deletedClient = null;
     render();
     setSyncing('synced');
@@ -2300,18 +2208,14 @@ async function undoDelete() {
   }
 }
 
-// Load all 8 demo clients into the database.
-// Clears existing data first (with confirmation).
 async function loadDemo() {
   if (clients.length > 0 && !confirm('Replace existing clients with demo data?')) return;
 
   setSyncing('syncing');
   try {
-    // Delete all existing clients
     for (const c of clients) { await DB.deleteClient(c.id); }
     clients = [];
 
-    // Insert each demo client
     for (const demo of DEMO_CLIENTS) {
       const data  = { ...demo, id: uid(), _isNew: true };
       const saved = await DB.saveClient(data);
@@ -2328,13 +2232,12 @@ async function loadDemo() {
   }
 }
 
-// Export all clients as a CSV file download
 function exportCSV() {
   if (!clients.length) { showToast('No clients to export'); return; }
 
   const cols = ['name','contact','owner','stage','health','value','started','payment','renews','tags','action','notes'];
   const rows = [
-    cols.join(','), // header row
+    cols.join(','),
     ...clients.map(c =>
       cols.map(k => `"${(k === 'tags' ? (c[k] || []).join(';') : c[k] || '').toString().replace(/"/g, '""')}"`).join(',')
     ),
@@ -2348,8 +2251,6 @@ function exportCSV() {
   showToast('CSV exported');
 }
 
-// Show a toast notification at the bottom of the screen.
-// If undo=true, shows an "Undo" button (used after delete).
 function showToast(msg, undo = false) {
   clearTimeout(toastTimer);
   document.getElementById('toastMsg').textContent  = msg;
@@ -2361,36 +2262,26 @@ function showToast(msg, undo = false) {
 
 /* ============================================================
    SECTION 10: DRAG AND DROP
-   ─────────────────────────────────────────────────────────────
-   Uses the HTML5 Drag and Drop API to move cards between columns.
-   When a card is dropped in a new column, its stage is updated
-   in the database and the card's started date resets (so the
-   "days in stage" counter restarts from today).
    ============================================================ */
 
-// Called when a card starts being dragged
 function dragStart(e, id) {
   dragId = id;
   e.dataTransfer.effectAllowed = 'move';
-  setTimeout(() => e.target.classList.add('dragging'), 0); // slight delay prevents flicker
+  setTimeout(() => e.target.classList.add('dragging'), 0);
 }
 
-// Called when dragging ends (drop or cancel)
 function dragEnd(e) {
   e.currentTarget.classList.remove('dragging');
   dragId = null;
 }
 
-// Called continuously while a card is dragged over a column
 function dragOver(e) {
-  e.preventDefault(); // required to allow dropping
+  e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-  // Highlight only the column being hovered over
   document.querySelectorAll('.col-body').forEach(b => b.classList.remove('drag-over'));
   e.currentTarget.classList.add('drag-over');
 }
 
-// Called when a card is dropped onto a column
 async function drop(e, colBody) {
   e.preventDefault();
   document.querySelectorAll('.col-body').forEach(b => b.classList.remove('drag-over'));
@@ -2398,32 +2289,29 @@ async function drop(e, colBody) {
 
   const newStage = colBody.dataset.stage;
   const client   = clients.find(x => x.id === dragId);
-  if (!client || client.stage === newStage) return; // no change needed
+  if (!client || client.stage === newStage) return;
 
   const oldStage = client.stage;
 
-  // Calculate days spent in previous stage before resetting
   const started    = client.started ? new Date(client.started) : new Date();
   const daysInPrev = Math.round((new Date() - started) / (1000 * 60 * 60 * 24));
 
-  // Update health automatically when moving between stages
   if (newStage === 'risk' || newStage === 'churned') client.health = 'red';
   if (newStage === 'active' && client.health === 'red') client.health = 'amber';
 
   client.stage   = newStage;
-  client.started = new Date().toISOString().slice(0, 10); // reset days-in-stage counter
+  client.started = new Date().toISOString().slice(0, 10);
 
-  render(); // update UI immediately (optimistic)
+  render();
 
   setSyncing('syncing');
   try {
     await DB.saveClient(client);
     setSyncing('synced');
     showToast(`Moved to ${STAGES.find(s => s.key === newStage)?.label}`);
-    // Track stage change — includes time spent in previous stage
     trackStageChange(client, oldStage, newStage, daysInPrev);
   } catch (err) {
-    // Rollback on failure
+    // Rollback
     client.stage = oldStage;
     render();
     setSyncing('error');
@@ -2437,37 +2325,38 @@ async function drop(e, colBody) {
    ─────────────────────────────────────────────────────────────
    N — new client (when not typing in a field)
    / — focus search input
-   Escape — close modal or blur current field
+   Escape — v12 precedence: tray > modal. If tray is open, close
+   it; otherwise fall through to existing modal close behavior.
    ============================================================ */
 document.addEventListener('keydown', e => {
   const isTyping = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
 
   if (isTyping) {
-    if (e.key === 'Escape') { e.target.blur(); closeModal(); }
-    return; // don't trigger shortcuts while typing
+    if (e.key === 'Escape') {
+      e.target.blur();
+      // v12: tray takes precedence — it feels more "on top" than the modal.
+      // closeModal() is a no-op if the modal is already shut, so safe to call.
+      if (trayOpen) closeNotificationTray();
+      else          closeModal();
+    }
+    return;
   }
 
-  if (!currentUser) return; // no shortcuts when logged out
+  if (!currentUser) return;
 
   if (e.key === 'n' || e.key === 'N') { e.preventDefault(); openModal(); }
   if (e.key === '/')                  { e.preventDefault(); document.getElementById('searchInput')?.focus(); }
-  if (e.key === 'Escape')             { closeModal(); }
+  if (e.key === 'Escape') {
+    if (trayOpen) closeNotificationTray();
+    else          closeModal();
+  }
 });
 
 
 /* ============================================================
    WELCOME ANIMATION — Ink Drop
-   ─────────────────────────────────────────────────────────────
-   A canvas-based ink bloom effect that plays when the user
-   first confirms their account. Organic expanding rings in the
-   brand teal palette — editorial, warm, considered.
-
-   HOW IT WORKS:
-   Multiple "drops" spawn at random positions. Each drop expands
-   as a circle, fading from a lighter teal to transparent as it
-   grows. Drops are staggered in time so they feel organic rather
-   than simultaneous. The canvas is cleared and redrawn every
-   frame via requestAnimationFrame.
+   Canvas-based bloom played when a new user confirms their
+   account. Organic teal/amber drops fade in over ~4 seconds.
    ============================================================ */
 function startInkAnimation() {
   const canvas = document.getElementById('inkCanvas');
@@ -2477,24 +2366,21 @@ function startInkAnimation() {
   const W   = canvas.offsetWidth;
   const H   = canvas.offsetHeight;
 
-  // Set actual pixel dimensions for sharp rendering on retina screens
   canvas.width  = W * window.devicePixelRatio;
   canvas.height = H * window.devicePixelRatio;
   ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
 
-  // Fill background immediately so white auth-box doesn't flash through
   ctx.fillStyle = '#2F4F4F';
   ctx.fillRect(0, 0, W, H);
 
   const drops = [];
 
-  // Colors that read beautifully against the deep teal background
   const colors = [
-    'rgba(74, 124, 89,',    // green — warmth
-    'rgba(100, 160, 140,',  // light teal — luminous
-    'rgba(198, 138, 46,',   // amber — warm surprise accent
-    'rgba(245, 241, 234,',  // paper white — soft glow
-    'rgba(61, 110, 110,',   // mid teal — depth
+    'rgba(74, 124, 89,',
+    'rgba(100, 160, 140,',
+    'rgba(198, 138, 46,',
+    'rgba(245, 241, 234,',
+    'rgba(61, 110, 110,',
   ];
 
   function spawnDrop(delay) {
@@ -2503,7 +2389,7 @@ function startInkAnimation() {
         x:       Math.random() * W,
         y:       Math.random() * H,
         r:       0,
-        maxR:    Math.min(W, H) * (0.3 + Math.random() * 0.5), // scale to panel size
+        maxR:    Math.min(W, H) * (0.3 + Math.random() * 0.5),
         speed:   0.8 + Math.random() * 1.2,
         opacity: 0.2 + Math.random() * 0.35,
         color:   colors[Math.floor(Math.random() * colors.length)],
@@ -2511,7 +2397,6 @@ function startInkAnimation() {
     }, delay);
   }
 
-  // 10 drops spread across 4 seconds for a rich layered bloom
   [0, 150, 320, 500, 720, 950, 1200, 1600, 2100, 2700].forEach(spawnDrop);
 
   let frame;
@@ -2521,7 +2406,6 @@ function startInkAnimation() {
     if (!startTime) startTime = timestamp;
     const elapsed = timestamp - startTime;
 
-    // Semi-transparent fill each frame creates organic trailing fade
     ctx.fillStyle = 'rgba(47, 79, 79, 0.12)';
     ctx.fillRect(0, 0, W, H);
 
@@ -2545,7 +2429,6 @@ function startInkAnimation() {
       ctx.fill();
     });
 
-    // Remove fully expanded drops
     for (let i = drops.length - 1; i >= 0; i--) {
       if (drops[i].r >= drops[i].maxR) drops.splice(i, 1);
     }
@@ -2557,7 +2440,6 @@ function startInkAnimation() {
 
   frame = requestAnimationFrame(draw);
 
-  // Fade in text via CSS transitions defined on the elements
   requestAnimationFrame(() => {
     const heading = document.getElementById('welcomeHeading');
     const sub     = document.getElementById('welcomeSub');
@@ -2568,9 +2450,7 @@ function startInkAnimation() {
   return () => cancelAnimationFrame(frame);
 }
 
-// Override defined after showPanel declaration — wraps it cleanly
 function showPanel(panel, email) {
-  // Reset welcome text opacity before showing (in case of re-trigger)
   const heading = document.getElementById('welcomeHeading');
   const sub     = document.getElementById('welcomeSub');
   if (heading) { heading.style.opacity = '0'; heading.style.transform = 'translateY(8px)'; }
@@ -2586,9 +2466,7 @@ function showPanel(panel, email) {
     document.getElementById('confirmEmail').textContent = email;
   }
 
-  // Start ink animation when welcome panel appears
   if (panel === 'welcome') {
-    // Small delay so the panel is visible before canvas sizes itself
     setTimeout(startInkAnimation, 30);
   }
 }
@@ -2596,54 +2474,28 @@ function showPanel(panel, email) {
 /* ============================================================
    SECTION 12: INIT (APP STARTUP)
    ─────────────────────────────────────────────────────────────
-   Runs immediately when the page loads. Handles three scenarios:
+   Four scenarios:
+   A) Confirmation token in URL  — fresh email confirmation
+   B) Saved session in localStorage — returning user
+   C) Cross-tab sync — confirm tab updates when sister tab logs in
+   D) No session — show auth screen
 
-   A) CONFIRMATION TOKEN IN URL
-      Supabase redirects here after email confirmation with
-      tokens in the URL hash (#access_token=...&type=signup).
-      We detect this, exchange the token for a session,
-      log the user in automatically, and clean the URL.
-
-   B) SAVED SESSION IN LOCALSTORAGE
-      Returning user — skip the login screen entirely.
-
-   C) CROSS-TAB SYNC
-      If the user confirmed in a new tab, this tab (the original
-      "Check your email" screen) detects it via a localStorage
-      event and transitions to the logged-in state automatically.
-
-   D) NO SESSION
-      Show the auth screen.
-
-   NOTE ON SESSION EXPIRY:
-   Supabase access tokens expire after 1 hour. v11 implements silent
-   refresh — startSessionRefresh() runs a 50-minute interval that
-   exchanges the refresh_token for a new access_token. Activity tracking
-   (click/keypress) resets the idle clock. If the user is idle for 60+
-   minutes the session is allowed to expire gracefully.
+   v12: startPendingPolling() runs alongside startSessionRefresh()
+   in scenarios A, B, and C. Both share the same auth lifecycle.
    ============================================================ */
 (function init() {
 
   // ── SCENARIO A: Confirmation token in URL ─────────────────
-  // After clicking the confirmation link in their email,
-  // Supabase redirects to our app with tokens in the URL hash:
-  // https://yoursite.com/crm#access_token=xxx&refresh_token=yyy&type=signup
   const hash   = window.location.hash;
   const params = new URLSearchParams(hash.replace('#', '?'));
 
   const accessToken  = params.get('access_token');
   const refreshToken = params.get('refresh_token');
-  const tokenType    = params.get('type'); // 'signup' for confirmations
+  const tokenType    = params.get('type');
 
   if (accessToken && tokenType === 'signup') {
-    // Clean the tokens out of the URL immediately — they shouldn't
-    // sit in the address bar or browser history after use
     history.replaceState(null, '', window.location.pathname);
 
-    // Exchange the URL tokens for a full verified session by fetching
-    // the user object. The access_token from the URL is valid but we
-    // need to build a complete session object that matches what Supabase
-    // returns from a normal password login — including token_type.
     fetch(`${SUPABASE_URL}/auth/v1/user`, {
       headers: {
         'apikey':        SUPABASE_ANON_KEY,
@@ -2655,23 +2507,19 @@ function showPanel(panel, email) {
       return r.json();
     })
     .then(user => {
-      // Build a complete session object — token_type is required for
-      // all subsequent authenticated Supabase API calls to work correctly.
-      // Without it, DB inserts and tracking calls return 403/permission denied.
       currentSession = {
         access_token:  accessToken,
         refresh_token: refreshToken,
         token_type:    'bearer',
       };
       currentUser = user;
-      onAuthSuccess(false); // false = show welcome animation (new user)
+      onAuthSuccess(false);
     })
     .catch(() => {
-      // Token exchange failed — fall back to sign in screen
       showAppState(false);
     });
 
-    return; // don't fall through to other scenarios
+    return;
   }
 
   // ── SCENARIO B: Saved session ─────────────────────────────
@@ -2682,31 +2530,27 @@ function showPanel(panel, email) {
       if (session && user) {
         currentSession = session;
         currentUser    = user;
-        showAppState(true);      // show app immediately
-        loadClients();           // fetch data in background
-        startSessionRefresh();   // resume silent refresh for restored session
+        showAppState(true);
+        loadClients();
+        startSessionRefresh();
+        startPendingPolling(); // v12: resume polling on session restore
         return;
       }
     } catch (e) {
-      // Corrupted session data — fall through to auth screen
+      // Corrupted session — fall through to auth screen.
     }
   }
 
-  // ── SCENARIO D: No session — show auth screen ─────────────
+  // ── SCENARIO D: No session ────────────────────────────────
   showAppState(false);
 
 })();
 
 // ── SCENARIO C: Cross-tab sync ───────────────────────────────
-// Listen for localStorage changes from other tabs.
-// When a confirmation happens in a new tab, onAuthSuccess()
-// writes a 'cwc-auth-event' key. This tab detects it and
-// transitions from "Check your email" to logged-in state.
 window.addEventListener('storage', (e) => {
   if (e.key !== 'cwc-auth-event') return;
-  if (currentUser) return; // already logged in, nothing to do
+  if (currentUser) return;
 
-  // Another tab just logged in — read their session and use it
   const saved = localStorage.getItem('cwc-session');
   if (!saved) return;
 
@@ -2715,15 +2559,19 @@ window.addEventListener('storage', (e) => {
     if (session && user) {
       currentSession = session;
       currentUser    = user;
-      // Show welcome briefly — this tab was on the confirm screen
       showPanel('welcome');
       setTimeout(() => {
         showAppState(true);
         loadClients();
+        // v12: cross-tab sync also needs to start the refresh + poll
+        // timers, otherwise the original tab's session would silently
+        // expire and the badge would never populate.
+        startSessionRefresh();
+        startPendingPolling();
       }, 4000);
     }
   } catch (e) {
-    // Ignore — session was malformed
+    // Malformed session — ignore.
   }
 });
 
@@ -2736,23 +2584,22 @@ window.addEventListener('storage', (e) => {
   • 3-4 major features
   • 1 developer
 
-  When you hit those limits, or want to collaborate with
-  others, the right move is Claude Code — a command-line tool
-  that manages a proper project structure, runs a local
-  development server, handles file imports, and deploys
-  automatically. At that point the sections above become:
+  When you hit those limits, move to Claude Code with a proper
+  project structure. The sections above become:
 
-    /src/lib/supabase.js    ← SECTION 5 (sbFetch, to/fromSupabase)
-    /src/lib/db.js          ← SECTION 4 (DB object)
-    /src/lib/auth.js        ← SECTION 6 (signIn, signUp, signOut)
+    /src/lib/supabase.js       ← SECTION 5
+    /src/lib/db.js             ← SECTION 4
+    /src/lib/auth.js           ← SECTION 6
+    /src/lib/notifications.js  ← SECTION 5B (pending leads)
     /src/components/Board.js   ← renderBoard, cardHTML
     /src/components/Table.js   ← renderTable
     /src/components/Modal.js   ← openModal, saveClient
+    /src/components/Tray.js    ← SECTION 8B
     /src/styles/main.css       ← all the CSS
     /src/App.js                ← render, updateStats, init
-    index.html                 ← just <script src="App.js">
+    index.html                 ← <script src="App.js">
 
-  The logic stays identical. Only the file boundaries change.
+  The logic stays identical. Only file boundaries change.
   ============================================================
 */
 </script>
